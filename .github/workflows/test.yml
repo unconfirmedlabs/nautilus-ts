@@ -20,3 +20,101 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # pin@stable
       - run: cargo test --locked --manifest-path enclave/nsm-ffi/Cargo.toml
       - run: cargo test --locked --manifest-path enclave/traffic-forwarder/Cargo.toml
+
+  build-eif:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+      - run: make
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
+        with:
+          name: eif
+          path: out/nitro.eif
+          retention-days: 1
+
+  enclave-smoke:
+    needs: build-eif
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
+        with:
+          name: eif
+          path: out/
+
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > /tmp/ci-key.pem
+          chmod 600 /tmp/ci-key.pem
+
+      - name: Launch spot instance
+        id: ec2
+        run: |
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --launch-template LaunchTemplateId=${{ secrets.EC2_LAUNCH_TEMPLATE_ID }} \
+            --instance-type c5a.xlarge \
+            --image-id ami-0d0623e6c03ddc905 \
+            --key-name nautilus-ci-runner \
+            --security-group-ids ${{ secrets.EC2_SECURITY_GROUP_ID }} \
+            --subnet-id ${{ secrets.EC2_SUBNET_ID }} \
+            --instance-market-options '{"MarketType":"spot"}' \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=nautilus-ci-smoke}]' \
+            --query 'Instances[0].InstanceId' --output text)
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "Launched instance: $INSTANCE_ID"
+
+          echo "Waiting for instance to be running..."
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+
+          PUBLIC_IP=$(aws ec2 describe-instances \
+            --instance-ids "$INSTANCE_ID" \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          echo "ip=$PUBLIC_IP" >> "$GITHUB_OUTPUT"
+          echo "Instance IP: $PUBLIC_IP"
+
+      - name: Wait for SSH
+        run: |
+          for i in $(seq 1 30); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+              -i /tmp/ci-key.pem ec2-user@${{ steps.ec2.outputs.ip }} "echo ready" 2>/dev/null; then
+              echo "SSH is ready"
+              exit 0
+            fi
+            echo "Waiting for SSH... ($i/30)"
+            sleep 10
+          done
+          echo "SSH timeout"
+          exit 1
+
+      - name: Install enclave dependencies
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ci-key.pem ec2-user@${{ steps.ec2.outputs.ip }} '
+            sudo dnf install -y aws-nitro-enclaves-cli socat jq
+            sudo sed -i "s/^cpu_count:.*/cpu_count: 2/" /etc/nitro_enclaves/allocator.yaml
+            sudo sed -i "s/^memory_mib:.*/memory_mib: 4096/" /etc/nitro_enclaves/allocator.yaml
+            sudo systemctl enable --now nitro-enclaves-allocator
+            sudo usermod -aG ne ec2-user
+          '
+
+      - name: Upload EIF and smoke test
+        run: |
+          scp -o StrictHostKeyChecking=no -i /tmp/ci-key.pem \
+            out/nitro.eif scripts/enclave-smoke-test.sh \
+            ec2-user@${{ steps.ec2.outputs.ip }}:~/
+
+      - name: Run smoke test
+        run: |
+          ssh -o StrictHostKeyChecking=no -i /tmp/ci-key.pem ec2-user@${{ steps.ec2.outputs.ip }} '
+            chmod +x ~/enclave-smoke-test.sh
+            ~/enclave-smoke-test.sh ~/nitro.eif
+          '
+
+      - name: Terminate instance
+        if: always()
+        run: |
+          aws ec2 terminate-instances --instance-ids ${{ steps.ec2.outputs.instance_id }} || true
