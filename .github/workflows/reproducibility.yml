@@ -9,5 +9,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
-      - uses: oven-sh/setup-bun@735343b667d3e6f658f3de0a9e1ade3110295498 # pin@v2.0.2
+      - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # pin@v2.1.3
       - run: bun scripts/check-reproducibility.ts
