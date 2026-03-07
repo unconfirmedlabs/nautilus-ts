@@ -19,7 +19,7 @@ interface NsmLib {
     outLenPtr: number,
   ) => number;
   nsm_get_random: (outPtr: number) => number;
-  nsm_free: (ptr: number) => void;
+  nsm_free: (ptr: number, len: number) => void;
 }
 
 let lib: ReturnType<typeof dlopen> | null = null;
@@ -47,7 +47,7 @@ function getLib() {
         },
         nsm_free: {
           returns: FFIType.void,
-          args: [FFIType.ptr],
+          args: [FFIType.ptr, FFIType.u32],
         },
       });
       return lib;
@@ -79,7 +79,7 @@ export function getAttestation(publicKey: Uint8Array): Uint8Array | null {
 
   const len = outLen.readUInt32LE(0);
   const result = new Uint8Array(toBuffer(resultPtr, 0, len));
-  l.symbols.nsm_free(resultPtr);
+  l.symbols.nsm_free(resultPtr, len);
 
   return result;
 }

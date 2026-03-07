@@ -9,10 +9,10 @@ use std::ptr;
 /// Request an attestation document bound to the given public key.
 ///
 /// Returns a heap-allocated buffer with the attestation document bytes.
-/// The caller must free it with `nsm_free`.
+/// The caller must free it with `nsm_free(ptr, len)`.
 ///
 /// `out_len` receives the length of the returned buffer.
-/// Returns null on failure.
+/// Returns null on failure or if `pk_ptr` / `out_len` is null.
 ///
 /// # Safety
 /// `pk_ptr` must point to `pk_len` bytes. `out_len` must be a valid pointer.
@@ -22,6 +22,10 @@ pub unsafe extern "C" fn nsm_get_attestation(
     pk_len: u32,
     out_len: *mut u32,
 ) -> *mut u8 {
+    if pk_ptr.is_null() || out_len.is_null() {
+        return ptr::null_mut();
+    }
+
     let pk = std::slice::from_raw_parts(pk_ptr, pk_len as usize);
 
     let fd = nsm_api::driver::nsm_init();
@@ -51,9 +55,13 @@ pub unsafe extern "C" fn nsm_get_attestation(
 ///
 /// # Safety
 /// `out_ptr` must point to a buffer of at least 256 bytes.
-/// Returns 0 on success, -1 on failure.
+/// Returns 0 on success, -1 on failure or if `out_ptr` is null.
 #[no_mangle]
 pub unsafe extern "C" fn nsm_get_random(out_ptr: *mut u8) -> i32 {
+    if out_ptr.is_null() {
+        return -1;
+    }
+
     let fd = nsm_api::driver::nsm_init();
     let request = nsm_api::api::Request::GetRandom;
     let response = nsm_api::driver::nsm_process_request(fd, request);
@@ -76,15 +84,12 @@ pub unsafe extern "C" fn nsm_get_random(out_ptr: *mut u8) -> i32 {
 /// Free a buffer previously returned by `nsm_get_attestation`.
 ///
 /// # Safety
-/// `ptr` must be a pointer returned by `nsm_get_attestation`, or null.
+/// `data` must be a pointer returned by `nsm_get_attestation` and `len` must
+/// be the corresponding `out_len` value, or `data` must be null.
 #[no_mangle]
-pub unsafe extern "C" fn nsm_free(data: *mut u8) {
+pub unsafe extern "C" fn nsm_free(data: *mut u8, len: u32) {
     if !data.is_null() {
-        // We don't know the exact length, but Box::from_raw needs it.
-        // Since we used Box::into_raw(boxed_slice), we need the original
-        // slice. For safety, we accept a small leak here — in practice
-        // attestation is called once at boot so this is fine.
-        // A more robust approach would store the length alongside the pointer.
-        drop(Vec::from_raw_parts(data, 0, 0));
+        let len = len as usize;
+        drop(Box::from_raw(std::slice::from_raw_parts_mut(data, len)));
     }
 }

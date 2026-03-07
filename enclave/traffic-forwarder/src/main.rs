@@ -46,13 +46,19 @@ async fn main() {
     std::io::stdin().read_to_string(&mut input).expect("failed to read config from stdin");
     let config: Config = serde_json::from_str(&input).expect("invalid config JSON");
 
+    // Validate endpoint count — loopback IPs are 127.0.0.64..127.0.0.254
+    if config.endpoints.len() > 191 {
+        eprintln!("[traffic] too many endpoints (max 191)");
+        std::process::exit(1);
+    }
+
     // Write /etc/hosts
     write_hosts(&config.endpoints);
 
     // Spawn inbound bridge: VSOCK → TCP (HTTP traffic to Bun)
     let http_tcp_port = config.http_tcp_port;
     let http_vsock_port = config.http_vsock_port;
-    tokio::spawn(async move {
+    let inbound = tokio::spawn(async move {
         inbound_bridge(http_vsock_port, http_tcp_port).await;
     });
 
@@ -68,11 +74,24 @@ async fn main() {
         });
         handles.push(handle);
     }
+    handles.push(inbound);
 
     eprintln!("[traffic] ready");
 
-    // Block forever — all bridges run as spawned tasks
-    tokio::signal::ctrl_c().await.ok();
+    // Exit if any bridge task completes (they run forever, so completion means failure).
+    // Uses a JoinSet to avoid adding a futures dependency.
+    let mut set = tokio::task::JoinSet::new();
+    for handle in handles {
+        set.spawn(async { handle.await });
+    }
+    if let Some(result) = set.join_next().await {
+        match result {
+            Ok(Ok(())) => eprintln!("[traffic] bridge task exited unexpectedly"),
+            Ok(Err(e)) => eprintln!("[traffic] bridge task panicked: {e}"),
+            Err(e) => eprintln!("[traffic] bridge task join error: {e}"),
+        }
+    }
+    std::process::exit(1);
 }
 
 /// Write /etc/hosts mapping endpoint hostnames to loopback addresses.
