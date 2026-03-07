@@ -34,7 +34,8 @@ export async function receiveBootConfig(): Promise<BootConfig> {
   console.log("[config] waiting for boot config on VSOCK:7777...");
   const listenFd = vsockListen(7777);
   const clientFd = vsockAccept(listenFd);
-  const data = await vsockReadAll(clientFd);
+  const data = vsockReadAll(clientFd);
+  vsockClose(clientFd);
   vsockClose(listenFd);
 
   const json = data.toString("utf-8");

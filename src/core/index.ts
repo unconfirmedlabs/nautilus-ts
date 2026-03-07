@@ -6,9 +6,7 @@
 
 export type { BootConfig, Endpoint } from "./config.ts";
 export { receiveBootConfig, devBootConfig } from "./config.ts";
-export { setupLoopback, setupEndpoints } from "./network.ts";
-export type { Transport, TransportListener } from "./transport.ts";
-export { createTcpTransport, createVsockTransport, pipeSockets, runBridge } from "./transport.ts";
+export { setupLoopback } from "./network.ts";
 export type { Keypair } from "./crypto.ts";
 export {
   generateKeypair,

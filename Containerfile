@@ -2,7 +2,8 @@
 #
 # Architecture:
 #   - Compiled Bun standalone binary (includes all TS/JS deps)
-#   - Minimal Rust .so for NSM attestation only
+#   - Rust traffic-forwarder binary (async TCP↔VSOCK bridging)
+#   - Rust .so for NSM attestation (ioctl on /dev/nsm)
 #   - No Python, no shell scripts as PID 1
 #   - nit init runs the Bun binary directly
 
@@ -17,9 +18,10 @@ FROM stagex/core-rust@sha256:2ea0be043b92321b5d1c2784911a770ccca28c09c3cf6a0f81f
 FROM stagex/core-musl@sha256:d9af23284cca2e1002cd53159ada469dfe6d6791814e72d6163c7de18d4ae701 AS core-musl
 FROM stagex/core-libunwind@sha256:eb66122d8fc543f5e2f335bb1616f8c3a471604383e2c0a9df4a8e278505d3bc AS core-libunwind
 FROM stagex/core-pkgconf@sha256:52624a89bb8cc684bc0391fcb7770ded2bbcb281e84bdb68a31fce127439fd7b AS core-pkgconf
+FROM stagex/core-libffi@sha256:64d087343541401271cf9fec6b7bd788040c72a16918748ae36c171e53e94002 AS core-libffi
+FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS core-libzstd
 FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS core-busybox
 FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS user-eif_build
-FROM stagex/user-gen_initramfs@sha256:a87e9a3fa8468d2e08b5abb0a6da4c7a11df22273e2c526cb22e6b131151def8 AS user-gen_initramfs
 FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS user-linux-nitro
 FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73400de6f8a16df AS user-cpio
 FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS user-nit
@@ -41,7 +43,7 @@ COPY src/ /app/src/
 COPY package.json tsconfig.json /app/
 RUN bun build --compile --minify --bytecode --sourcemap --target=bun-linux-x64 ./src/server.ts --outfile nautilus-server
 
-# --- Build minimal Rust NSM FFI library ---
+# --- Build Rust components (NSM FFI + traffic forwarder) ---
 FROM scratch AS rust-base
 COPY --from=core-busybox . /
 COPY --from=core-musl . /
@@ -50,6 +52,8 @@ COPY --from=core-openssl . /
 COPY --from=core-zlib . /
 COPY --from=core-gcc . /
 COPY --from=core-llvm . /
+COPY --from=core-libffi . /
+COPY --from=core-libzstd . /
 COPY --from=core-rust . /
 COPY --from=core-pkgconf . /
 COPY --from=core-binutils . /
@@ -57,9 +61,12 @@ COPY --from=core-ca-certificates . /
 
 FROM rust-base AS rust-build
 COPY enclave/nsm-ffi /build/nsm-ffi
-WORKDIR /build/nsm-ffi
+COPY enclave/traffic-forwarder /build/traffic-forwarder
 ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
+WORKDIR /build/nsm-ffi
+RUN cargo build --release --target "$TARGET"
+WORKDIR /build/traffic-forwarder
 RUN cargo build --release --target "$TARGET"
 
 # --- Assemble initramfs ---
@@ -67,10 +74,10 @@ FROM scratch AS base
 COPY --from=core-busybox . /
 COPY --from=core-musl . /
 COPY --from=core-libunwind . /
+COPY --from=core-gcc . /
 COPY --from=core-openssl . /
 COPY --from=core-zlib . /
 COPY --from=core-ca-certificates . /
-COPY --from=user-gen_initramfs . /
 COPY --from=user-eif_build . /
 COPY --from=user-cpio . /
 COPY --from=user-linux-nitro /bzImage .
@@ -80,9 +87,9 @@ FROM base AS build
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
 
-RUN mkdir -p initramfs/etc/ssl/certs initramfs/lib
+RUN mkdir -p initramfs/etc/ssl/certs
 
-# Core system
+# Core system (busybox creates /lib symlink, so don't pre-create it)
 COPY --from=core-busybox . initramfs
 COPY --from=core-musl . initramfs
 COPY --from=core-ca-certificates /etc/ssl/certs initramfs/etc/ssl/certs
@@ -92,20 +99,23 @@ COPY --from=user-nit /bin/init initramfs
 COPY --from=bun-build /app/nautilus-server initramfs/nautilus-server
 RUN chmod +x initramfs/nautilus-server
 
-# Shared libs needed by Bun binary
-COPY --from=alpine-libs /usr/lib/libstdc++.so.6 initramfs/lib/libstdc++.so.6
-COPY --from=alpine-libs /usr/lib/libgcc_s.so.1 initramfs/lib/libgcc_s.so.1
-COPY --from=core-libunwind /usr/lib/libunwind.so.8 initramfs/lib/libunwind.so.8
+# Shared libs needed by Bun binary (resolve lib symlink for target dir)
+RUN mkdir -p initramfs/usr/lib
+COPY --from=alpine-libs /usr/lib/libstdc++.so.6 initramfs/usr/lib/libstdc++.so.6
+COPY --from=alpine-libs /usr/lib/libgcc_s.so.1 initramfs/usr/lib/libgcc_s.so.1
+COPY --from=core-libunwind /usr/lib/libunwind.so.8 initramfs/usr/lib/libunwind.so.8
 
-# NSM FFI library
-RUN sh -c 'f=$(find /build -name "libnsm_ffi.so" | head -1); [ -n "$f" ] && cp "$f" initramfs/lib/libnsm_ffi.so || echo "WARN: no libnsm_ffi.so found"'
+# Rust binaries (from rust-build stage)
+COPY --from=rust-build /build/nsm-ffi/target/x86_64-unknown-linux-musl/release/libnsm_ffi.so initramfs/usr/lib/libnsm_ffi.so
+COPY --from=rust-build /build/traffic-forwarder/target/x86_64-unknown-linux-musl/release/traffic-forwarder initramfs/traffic-forwarder
+RUN chmod +x initramfs/traffic-forwarder
 
 # Environment
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 SSL_CERT_DIR=/etc/ssl/certs
-NSM_LIB_PATH=/lib/libnsm_ffi.so
-LD_LIBRARY_PATH=/lib
+NSM_LIB_PATH=/usr/lib/libnsm_ffi.so
+LD_LIBRARY_PATH=/usr/lib:/lib
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 EOF
 

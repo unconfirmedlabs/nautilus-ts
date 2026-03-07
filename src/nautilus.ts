@@ -24,7 +24,6 @@ import {
   receiveBootConfig,
   devBootConfig,
   setupLoopback,
-  setupEndpoints,
   generateKeypair,
   sign,
   suiAddress,
@@ -113,15 +112,36 @@ export class Nautilus {
     return this;
   }
 
+  /** Spawn the Rust traffic forwarder as a child process. */
+  private startTrafficForwarder(config: BootConfig, httpPort: number): void {
+    const forwarderConfig = JSON.stringify({
+      http_vsock_port: httpPort,
+      http_tcp_port: httpPort,
+      endpoints: config.endpoints,
+    });
+
+    const proc = Bun.spawn(["/traffic-forwarder"], {
+      stdin: new Blob([forwarderConfig]),
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+
+    proc.exited.then((code) => {
+      console.error(`[nautilus] traffic-forwarder exited with code ${code}`);
+      process.exit(1);
+    });
+
+    console.log(`[nautilus] traffic-forwarder started (pid ${proc.pid})`);
+  }
+
   /**
    * Boot the enclave and start the HTTP server.
    *
    * In enclave mode:
    *   1. Set up loopback networking
    *   2. Receive config from host via VSOCK:7777
-   *   3. Configure /etc/hosts and traffic forwarders
-   *   4. Start VSOCK:3000 → TCP:3000 bridge
-   *   5. Start HTTP server on TCP:3000
+   *   3. Spawn Rust traffic forwarder (handles /etc/hosts, TCP↔VSOCK bridges)
+   *   4. Start HTTP server on TCP:3000
    *
    * In dev mode:
    *   1. Read config from file or use defaults
@@ -135,20 +155,9 @@ export class Nautilus {
       console.log("[nautilus] booting in enclave mode");
       setupLoopback();
       config = await receiveBootConfig();
-      await setupEndpoints(config.endpoints);
 
-      // Start VSOCK → TCP bridge using transport abstraction
-      const { vsockTransportListener } = await import("./core/vsock.ts");
-      const { runBridge } = await import("./core/transport.ts");
-      const { createConnection } = await import("node:net");
-      const port = this.port;
-      const listener = vsockTransportListener(port);
-      runBridge(listener, () =>
-        new Promise((resolve, reject) => {
-          const sock = createConnection({ port, host: "127.0.0.1" }, () => resolve(sock));
-          sock.on("error", reject);
-        }),
-      );
+      // Spawn Rust traffic forwarder — handles /etc/hosts, inbound + outbound bridges
+      this.startTrafficForwarder(config, this.port);
     } else {
       console.log("[nautilus] booting in dev mode");
       config = await devBootConfig(this.configPath);
