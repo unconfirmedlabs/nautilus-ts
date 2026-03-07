@@ -2,18 +2,18 @@
  * Integration tests for the Nautilus framework.
  *
  * Tests the HTTP server, built-in routes, custom routes, error handling,
- * and body size limits. Uses Bun.serve() in dev mode.
+ * and body size enforcement. Uses Bun.serve() in dev mode.
  */
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Nautilus } from "../src/nautilus.ts";
 
 let baseUrl: string;
-const PORT = 9900;
+let app: Nautilus;
 
 beforeAll(async () => {
-  const app = new Nautilus();
-  app.setPort(PORT);
+  app = new Nautilus();
+  app.setPort(0); // ephemeral port — avoids conflicts
   app.setMaxBodySize(1024); // 1KB limit for testing
 
   // Custom routes
@@ -42,7 +42,11 @@ beforeAll(async () => {
   });
 
   await app.start();
-  baseUrl = `http://127.0.0.1:${PORT}`;
+  baseUrl = `http://127.0.0.1:${app.listeningPort}`;
+});
+
+afterAll(() => {
+  app?.stop();
 });
 
 describe("built-in routes", () => {
@@ -141,6 +145,27 @@ describe("error handling", () => {
   });
 });
 
+describe("body size limit", () => {
+  test("rejects request body exceeding maxBodySize", async () => {
+    const oversized = new Uint8Array(2048); // 2KB > 1KB limit
+    const res = await fetch(`${baseUrl}/sign`, {
+      method: "POST",
+      body: oversized,
+    });
+    // Bun returns 413 when maxRequestBodySize is exceeded
+    expect(res.status).toBe(413);
+  });
+
+  test("accepts request body within maxBodySize", async () => {
+    const ok = new Uint8Array(512); // 512B < 1KB limit
+    const res = await fetch(`${baseUrl}/sign`, {
+      method: "POST",
+      body: ok,
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("security", () => {
   test("address derivation matches pk from health_check", async () => {
     const { pk, address } = await (await fetch(`${baseUrl}/health_check`)).json();
@@ -186,5 +211,13 @@ describe("security", () => {
     tampered[0] ^= 0x01;
     const correctHash = blake2b256(new Uint8Array([1, 2, 3]));
     expect(verify(pk, correctHash, tampered)).toBe(false);
+  });
+
+  test("ctx.keypair is not exposed to route handlers", async () => {
+    // The /echo route uses ctx — verify it doesn't leak private key
+    const res = await fetch(`${baseUrl}/echo`);
+    const data = await res.json();
+    // Only pk and address should be present, no privateKey
+    expect(Object.keys(data).sort()).toEqual(["address", "pk"]);
   });
 });

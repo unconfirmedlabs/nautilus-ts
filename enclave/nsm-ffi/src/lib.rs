@@ -93,3 +93,68 @@ pub unsafe extern "C" fn nsm_free(data: *mut u8, len: u32) {
         drop(Box::from_raw(std::slice::from_raw_parts_mut(data, len)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nsm_free_null_is_safe() {
+        unsafe { nsm_free(ptr::null_mut(), 0) };
+        unsafe { nsm_free(ptr::null_mut(), 100) };
+    }
+
+    #[test]
+    fn nsm_free_round_trip() {
+        // Simulate what nsm_get_attestation does: boxed slice → raw ptr → free
+        let data = vec![1u8, 2, 3, 4, 5];
+        let len = data.len() as u32;
+        let boxed = data.into_boxed_slice();
+        let raw = Box::into_raw(boxed) as *mut u8;
+
+        // This should not leak or crash
+        unsafe { nsm_free(raw, len) };
+    }
+
+    #[test]
+    fn nsm_free_large_buffer() {
+        let data = vec![0xABu8; 16384];
+        let len = data.len() as u32;
+        let boxed = data.into_boxed_slice();
+        let raw = Box::into_raw(boxed) as *mut u8;
+
+        unsafe { nsm_free(raw, len) };
+    }
+
+    #[test]
+    fn nsm_get_attestation_null_pk_returns_null() {
+        let mut out_len: u32 = 0;
+        let result = unsafe {
+            nsm_get_attestation(ptr::null(), 0, &mut out_len as *mut u32)
+        };
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn nsm_get_attestation_null_out_len_returns_null() {
+        let pk = [0u8; 32];
+        let result = unsafe {
+            nsm_get_attestation(pk.as_ptr(), 32, ptr::null_mut())
+        };
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn nsm_get_attestation_both_null_returns_null() {
+        let result = unsafe {
+            nsm_get_attestation(ptr::null(), 0, ptr::null_mut())
+        };
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn nsm_get_random_null_returns_error() {
+        let result = unsafe { nsm_get_random(ptr::null_mut()) };
+        assert_eq!(result, -1);
+    }
+}

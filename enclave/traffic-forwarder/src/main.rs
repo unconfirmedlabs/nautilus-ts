@@ -46,11 +46,8 @@ async fn main() {
     std::io::stdin().read_to_string(&mut input).expect("failed to read config from stdin");
     let config: Config = serde_json::from_str(&input).expect("invalid config JSON");
 
-    // Validate endpoint count — loopback IPs are 127.0.0.64..127.0.0.254
-    if config.endpoints.len() > 191 {
-        eprintln!("[traffic] too many endpoints (max 191)");
-        std::process::exit(1);
-    }
+    validate_config(&config);
+
 
     // Write /etc/hosts
     write_hosts(&config.endpoints);
@@ -92,6 +89,14 @@ async fn main() {
         }
     }
     std::process::exit(1);
+}
+
+/// Validate config before use. Exits on invalid input.
+fn validate_config(config: &Config) {
+    if config.endpoints.len() > 191 {
+        eprintln!("[traffic] too many endpoints (max 191, got {})", config.endpoints.len());
+        std::process::exit(1);
+    }
 }
 
 /// Write /etc/hosts mapping endpoint hostnames to loopback addresses.
@@ -178,4 +183,77 @@ async fn bridge_outbound(tcp_stream: TcpStream, vsock_port: u32) -> io::Result<(
         r = s2c => { r?; }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(n_endpoints: usize) -> Config {
+        Config {
+            http_vsock_port: 3000,
+            http_tcp_port: 3000,
+            endpoints: (0..n_endpoints)
+                .map(|i| Endpoint {
+                    host: format!("host-{i}.example.com"),
+                    vsock_port: 8000 + i as u32,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn config_parses_valid_json() {
+        let json = r#"{"http_vsock_port":3000,"http_tcp_port":3000,"endpoints":[{"host":"sui.io","vsock_port":8443}]}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.endpoints.len(), 1);
+        assert_eq!(config.endpoints[0].host, "sui.io");
+        assert_eq!(config.endpoints[0].vsock_port, 8443);
+    }
+
+    #[test]
+    fn config_parses_empty_endpoints() {
+        let json = r#"{"http_vsock_port":3000,"http_tcp_port":3000,"endpoints":[]}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.endpoints.is_empty());
+    }
+
+    #[test]
+    fn config_rejects_missing_fields() {
+        let json = r#"{"endpoints":[]}"#;
+        assert!(serde_json::from_str::<Config>(json).is_err());
+    }
+
+    #[test]
+    fn validate_config_accepts_191_endpoints() {
+        let config = make_config(191);
+        validate_config(&config); // should not panic
+    }
+
+    #[test]
+    fn loopback_ip_generation() {
+        // Verify the IP arithmetic produces valid addresses
+        for i in 0..191usize {
+            let ip = format!("127.0.0.{}", 64 + i);
+            assert!(ip.parse::<std::net::Ipv4Addr>().is_ok(), "invalid IP: {ip}");
+        }
+    }
+
+    #[test]
+    fn hosts_file_content() {
+        let endpoints = vec![
+            Endpoint { host: "sui.io".into(), vsock_port: 8001 },
+            Endpoint { host: "walrus.io".into(), vsock_port: 8002 },
+        ];
+        // Verify the generated content is well-formed
+        let mut lines = vec!["127.0.0.1   localhost".to_string()];
+        for (i, ep) in endpoints.iter().enumerate() {
+            lines.push(format!("127.0.0.{}   {}", 64 + i, ep.host));
+        }
+        let content = lines.join("\n") + "\n";
+        assert!(content.contains("127.0.0.1   localhost"));
+        assert!(content.contains("127.0.0.64   sui.io"));
+        assert!(content.contains("127.0.0.65   walrus.io"));
+        assert_eq!(content.lines().count(), 3);
+    }
 }

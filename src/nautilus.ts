@@ -73,6 +73,18 @@ export class Nautilus {
   private port = 3000;
   private maxBodySize = Number(process.env.MAX_BODY_SIZE) || 10 * 1024 * 1024;
   private configPath?: string;
+  private server?: ReturnType<typeof Bun.serve>;
+
+  /** Actual port the server is listening on (useful when port 0 is used). */
+  get listeningPort(): number | undefined {
+    return this.server?.port;
+  }
+
+  /** Stop the HTTP server. */
+  stop(): void {
+    this.server?.stop(true);
+    this.server = undefined;
+  }
 
   /**
    * Register a route handler.
@@ -206,7 +218,7 @@ export class Nautilus {
 
     // Start HTTP server
     const routes = this.routes;
-    Bun.serve({
+    this.server = Bun.serve({
       port: this.port,
       hostname: "127.0.0.1",
       maxRequestBodySize: this.maxBodySize,
@@ -243,6 +255,6 @@ export class Nautilus {
       },
     });
 
-    console.log(`[nautilus] listening on 127.0.0.1:${this.port}`);
+    console.log(`[nautilus] listening on 127.0.0.1:${this.server.port}`);
   }
 }
