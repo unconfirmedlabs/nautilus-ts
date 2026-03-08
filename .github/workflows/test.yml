@@ -52,7 +52,7 @@ jobs:
         with:
           go-version-file: argonaut/go.mod
       - name: Build argonaut for host
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../../out/argonaut .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../out/argonaut .
         working-directory: argonaut
       - name: Run enclave smoke test on EC2 spot
         env:
