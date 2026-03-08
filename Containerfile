@@ -37,7 +37,7 @@ WORKDIR /app
 COPY --from=bun-deps /app/node_modules /app/node_modules
 COPY src/ /app/src/
 COPY package.json tsconfig.json /app/
-RUN bun build --compile --minify --bytecode --sourcemap --target=bun-linux-x64-musl ./src/server.ts --outfile nautilus-server
+RUN bun build --compile --minify --sourcemap --target=bun-linux-x64-musl ./src/server.ts --outfile nautilus-server
 
 # --- Build Rust NSM proxy ---
 FROM scratch AS rust-base
