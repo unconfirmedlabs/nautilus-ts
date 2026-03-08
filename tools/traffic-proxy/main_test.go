@@ -10,7 +10,7 @@ import (
 )
 
 func TestConfigParsesValidJSON(t *testing.T) {
-	input := `{"http_vsock_port":3000,"http_tcp_port":3000,"endpoints":[{"host":"sui.io","vsock_port":8443}]}`
+	input := `{"httpVsockPort":3000,"httpTcpPort":3000,"endpoints":[{"host":"sui.io","vsockPort":8443}]}`
 	var config Config
 	if err := json.NewDecoder(strings.NewReader(input)).Decode(&config); err != nil {
 		t.Fatal(err)
@@ -27,7 +27,7 @@ func TestConfigParsesValidJSON(t *testing.T) {
 }
 
 func TestConfigParsesEmptyEndpoints(t *testing.T) {
-	input := `{"http_vsock_port":3000,"http_tcp_port":3000,"endpoints":[]}`
+	input := `{"httpVsockPort":3000,"httpTcpPort":3000,"endpoints":[]}`
 	var config Config
 	if err := json.NewDecoder(strings.NewReader(input)).Decode(&config); err != nil {
 		t.Fatal(err)

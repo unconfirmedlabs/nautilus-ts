@@ -1,8 +1,8 @@
 /**
- * Example Nautilus server.
+ * Example Nautilus server — built-in router.
  *
- * This file is intentionally minimal and intended as a starting point.
- * Add your business routes here.
+ * This file shows the batteries-included approach.
+ * For Hono/Elysia/custom frameworks, see server-hono.ts.
  */
 
 import { Nautilus } from "./nautilus.ts";

@@ -10,7 +10,7 @@ describe("devBootConfig", () => {
   test("returns defaults when no path given", async () => {
     const config = await devBootConfig();
     expect(config.endpoints).toEqual([]);
-    expect(config.log_level).toBeDefined();
+    expect(config.logLevel).toBeDefined();
     expect(config.app).toEqual({});
   });
 
@@ -18,10 +18,10 @@ describe("devBootConfig", () => {
     const tmpPath = "/tmp/nautilus-test-config.json";
     const testConfig: BootConfig = {
       endpoints: [
-        { host: "example.com", vsock_port: 8443 },
+        { host: "example.com", vsockPort: 8443 },
       ],
       secrets: { API_KEY: "test-key" },
-      log_level: "debug",
+      logLevel: "debug",
       app: { foo: "bar" },
     };
 
@@ -30,9 +30,9 @@ describe("devBootConfig", () => {
 
     expect(config.endpoints).toHaveLength(1);
     expect(config.endpoints[0].host).toBe("example.com");
-    expect(config.endpoints[0].vsock_port).toBe(8443);
+    expect(config.endpoints[0].vsockPort).toBe(8443);
     expect(config.secrets?.API_KEY).toBe("test-key");
-    expect(config.log_level).toBe("debug");
+    expect(config.logLevel).toBe("debug");
     expect(config.app?.foo).toBe("bar");
   });
 
@@ -52,7 +52,7 @@ describe("devBootConfig", () => {
     process.env.LOG_LEVEL = "warn";
 
     const config = await devBootConfig();
-    expect(config.log_level).toBe("warn");
+    expect(config.logLevel).toBe("warn");
 
     if (prev !== undefined) process.env.LOG_LEVEL = prev;
     else delete process.env.LOG_LEVEL;
@@ -67,7 +67,7 @@ describe("BootConfig shape", () => {
 
     expect(config.endpoints).toEqual([]);
     expect(config.secrets).toBeUndefined();
-    expect(config.log_level).toBeUndefined();
+    expect(config.logLevel).toBeUndefined();
     expect(config.app).toBeUndefined();
   });
 
@@ -75,9 +75,9 @@ describe("BootConfig shape", () => {
     const tmpPath = "/tmp/nautilus-test-multi.json";
     await Bun.write(tmpPath, JSON.stringify({
       endpoints: [
-        { host: "sui.io", vsock_port: 8001 },
-        { host: "walrus.io", vsock_port: 8002 },
-        { host: "seal.io", vsock_port: 8003 },
+        { host: "sui.io", vsockPort: 8001 },
+        { host: "walrus.io", vsockPort: 8002 },
+        { host: "seal.io", vsockPort: 8003 },
       ],
     }));
     const config = await devBootConfig(tmpPath);
@@ -87,9 +87,9 @@ describe("BootConfig shape", () => {
 
 describe("validateBootConfig", () => {
   const valid: BootConfig = {
-    endpoints: [{ host: "sui.io", vsock_port: 8443 }],
+    endpoints: [{ host: "sui.io", vsockPort: 8443 }],
     secrets: { API_KEY: "test" },
-    log_level: "debug",
+    logLevel: "debug",
     app: { foo: "bar" },
   };
 
@@ -124,43 +124,43 @@ describe("validateBootConfig", () => {
   });
 
   test("rejects endpoint with missing host", () => {
-    expect(() => validateBootConfig({ endpoints: [{ vsock_port: 100 }] })).toThrow("host must be a non-empty string");
+    expect(() => validateBootConfig({ endpoints: [{ vsockPort: 100 }] })).toThrow("host must be a non-empty string");
   });
 
   test("rejects endpoint with empty host", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "", vsock_port: 100 }] })).toThrow("host must be a non-empty string");
+    expect(() => validateBootConfig({ endpoints: [{ host: "", vsockPort: 100 }] })).toThrow("host must be a non-empty string");
   });
 
   test("rejects endpoint with oversized host", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "a".repeat(254), vsock_port: 100 }] })).toThrow("host must be a non-empty string");
+    expect(() => validateBootConfig({ endpoints: [{ host: "a".repeat(254), vsockPort: 100 }] })).toThrow("host must be a non-empty string");
   });
 
   test("rejects endpoint host with whitespace", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com localhost", vsock_port: 100 }] })).toThrow("invalid characters");
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com localhost", vsockPort: 100 }] })).toThrow("invalid characters");
   });
 
   test("rejects endpoint host with newline", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com\n127.0.0.1 admin", vsock_port: 100 }] })).toThrow("invalid characters");
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com\n127.0.0.1 admin", vsockPort: 100 }] })).toThrow("invalid characters");
   });
 
   test("rejects endpoint host with tab", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com\tlocalhost", vsock_port: 100 }] })).toThrow("invalid characters");
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com\tlocalhost", vsockPort: 100 }] })).toThrow("invalid characters");
   });
 
   test("rejects endpoint with non-integer port", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 1.5 }] })).toThrow("vsock_port must be an integer in 1..65535");
+    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: 1.5 }] })).toThrow("vsockPort must be an integer in 1..65535");
   });
 
   test("rejects endpoint with port 0", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 0 }] })).toThrow("vsock_port must be an integer in 1..65535");
+    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: 0 }] })).toThrow("vsockPort must be an integer in 1..65535");
   });
 
   test("rejects endpoint with port > 65535", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 70000 }] })).toThrow("vsock_port must be an integer in 1..65535");
+    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: 70000 }] })).toThrow("vsockPort must be an integer in 1..65535");
   });
 
   test("rejects endpoint with negative port", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: -1 }] })).toThrow("vsock_port must be an integer in 1..65535");
+    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: -1 }] })).toThrow("vsockPort must be an integer in 1..65535");
   });
 
   test("rejects endpoint that is not an object", () => {
@@ -180,9 +180,9 @@ describe("validateBootConfig", () => {
     expect(() => validateBootConfig({ endpoints: [], secrets: { key: 123 } })).toThrow('secrets["key"] must be a string');
   });
 
-  // log_level
-  test("rejects non-string log_level", () => {
-    expect(() => validateBootConfig({ endpoints: [], log_level: 5 })).toThrow("log_level must be a string");
+  // logLevel
+  test("rejects non-string logLevel", () => {
+    expect(() => validateBootConfig({ endpoints: [], logLevel: 5 })).toThrow("logLevel must be a string");
   });
 
   // app
@@ -202,23 +202,23 @@ describe("validateBootConfig", () => {
   });
 
   test("rejects endpoint host with slash", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com/path", vsock_port: 100 }] })).toThrow("invalid characters");
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com/path", vsockPort: 100 }] })).toThrow("invalid characters");
   });
 
   test("rejects endpoint host with colon", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com:443", vsock_port: 100 }] })).toThrow("invalid characters");
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com:443", vsockPort: 100 }] })).toThrow("invalid characters");
   });
 
   test("accepts endpoint with port 1", () => {
-    expect(validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 1 }] })).toBeDefined();
+    expect(validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: 1 }] })).toBeDefined();
   });
 
   test("accepts endpoint with port 65535", () => {
-    expect(validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 65535 }] })).toBeDefined();
+    expect(validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: 65535 }] })).toBeDefined();
   });
 
   test("rejects endpoint with NaN port", () => {
-    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: NaN }] })).toThrow("vsock_port must be an integer");
+    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsockPort: NaN }] })).toThrow("vsockPort must be an integer");
   });
 });
 

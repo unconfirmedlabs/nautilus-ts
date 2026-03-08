@@ -120,14 +120,14 @@ func bridgeToVSOCK(src net.Conn, cid, port uint32) error {
 // --- Enclave mode: JSON config from stdin, multiple bridges ---
 
 type Config struct {
-	HTTPVsockPort uint32     `json:"http_vsock_port"`
-	HTTPTCPPort   uint16     `json:"http_tcp_port"`
+	HTTPVsockPort uint32     `json:"httpVsockPort"`
+	HTTPTCPPort   uint16     `json:"httpTcpPort"`
 	Endpoints     []Endpoint `json:"endpoints"`
 }
 
 type Endpoint struct {
 	Host      string `json:"host"`
-	VsockPort uint32 `json:"vsock_port"`
+	VsockPort uint32 `json:"vsockPort"`
 }
 
 func enclaveMode() {

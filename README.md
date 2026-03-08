@@ -103,8 +103,10 @@ ssh ec2-user@<host> "cd nautilus-ts && scripts/deploy.sh"
 
 ```
 src/
-  server.ts          # Your application entry point
-  nautilus.ts        # Framework: boot, routing, HTTP server
+  server.ts          # Example: built-in router
+  server-hono.ts     # Example: Hono integration
+  server-elysia.ts   # Example: Elysia integration
+  nautilus.ts        # Framework: boot(), Nautilus class, context
   core/
     config.ts        # Boot config via traffic-proxy VSOCK:7777
     network.ts       # Loopback interface setup
@@ -127,8 +129,8 @@ The enclave receives configuration at boot via VSOCK port 7777:
 ```json
 {
   "endpoints": [
-    { "host": "fullnode.testnet.sui.io", "vsock_port": 8104 },
-    { "host": "open.key-server.testnet.seal.mirai.cloud", "vsock_port": 8101 }
+    { "host": "fullnode.testnet.sui.io", "vsockPort": 8104 },
+    { "host": "open.key-server.testnet.seal.mirai.cloud", "vsockPort": 8101 }
   ],
   "app": {
     "sui_network": "testnet",
@@ -143,6 +145,54 @@ The enclave receives configuration at boot via VSOCK port 7777:
 
 ## Writing Routes
 
+Nautilus supports two patterns: bring your own framework, or use the built-in router.
+
+### With Hono (recommended)
+
+```ts
+import { boot } from "./nautilus.ts";
+import { Hono } from "hono";
+
+const ctx = await boot({ port: 3000 });
+const app = new Hono();
+
+app.get("/health_check", (c) =>
+  c.json({ pk: ctx.publicKey, address: ctx.address }),
+);
+
+app.post("/process", async (c) => {
+  const body = await c.req.json();
+  const signature = ctx.sign(ctx.blake2b256(new Uint8Array(body.data)));
+
+  return c.json({
+    result: "processed",
+    signature: ctx.toHex(signature),
+    publicKey: ctx.publicKey,
+  });
+});
+
+export default { port: 3000, hostname: "127.0.0.1", fetch: app.fetch };
+```
+
+### With Elysia
+
+```ts
+import { boot } from "./nautilus.ts";
+import { Elysia } from "elysia";
+
+const ctx = await boot({ port: 3000 });
+
+new Elysia()
+  .get("/health_check", () => ({ pk: ctx.publicKey, address: ctx.address }))
+  .post("/process", async ({ body }) => ({
+    result: "processed",
+    publicKey: ctx.publicKey,
+  }))
+  .listen({ port: 3000, hostname: "127.0.0.1" });
+```
+
+### Built-in router (no dependencies)
+
 ```ts
 import { Nautilus } from "./nautilus.ts";
 
@@ -150,31 +200,28 @@ const app = new Nautilus();
 
 app.post("/process", async (req, ctx) => {
   const body = await req.json();
-
-  // Use Mysten SDKs normally
-  const tx = new Transaction();
-  // ...
-
-  // Sign with ephemeral enclave keypair
-  const signature = ctx.sign(someData);
+  const signature = ctx.sign(ctx.blake2b256(new Uint8Array(body.data)));
 
   return Response.json({
     result: "processed",
     signature: ctx.toHex(signature),
-    public_key: ctx.publicKey,
+    publicKey: ctx.publicKey,
   });
 });
 
 app.start();
 ```
 
-The `ctx` object provides:
+### Context API
+
+The `boot()` function and `Nautilus` class both provide a `NautilusContext` with:
 
 - `ctx.sign(bytes)` — Ed25519 signature with ephemeral keypair
 - `ctx.publicKey` / `ctx.address` — Hex-encoded public key and Sui address
-- `ctx.config` — Boot configuration
+- `ctx.config` — Boot configuration (endpoints, secrets, app config)
 - `ctx.attest()` — NSM attestation document (enclave only)
 - `ctx.toHex()` / `ctx.fromHex()` / `ctx.blake2b256()` / `ctx.sha256()` — Crypto utilities
+- `ctx.shutdown()` — Clean up resources (call when your server stops)
 
 ## FAQ
 
@@ -261,7 +308,7 @@ Yes. `bun run dev` starts the server in dev mode — no enclave, no VSOCK, no NS
 135 tests across TypeScript, Go, and Rust cover every security boundary and functional path. Run all tests with:
 
 ```bash
-bun test                                                    # TypeScript (110 tests)
+bun test                                                    # TypeScript (113 tests)
 go test -v ./... -C tools/traffic-proxy                     # Go (9 tests)
 cargo test --locked --manifest-path tools/nsm-proxy/Cargo.toml  # Rust (16 tests)
 ```
@@ -275,14 +322,14 @@ cargo test --locked --manifest-path tools/nsm-proxy/Cargo.toml  # Rust (16 tests
 - **LOG_LEVEL env var** — Respects the `LOG_LEVEL` environment variable for dev mode defaults.
 - **Minimal config** — Accepts `{"endpoints": []}` with all optional fields undefined.
 - **Multiple endpoints** — Parses configs with multiple endpoint entries.
-- **Full config acceptance** — Validates a complete config with endpoints, secrets, log_level, and app.
+- **Full config acceptance** — Validates a complete config with endpoints, secrets, logLevel, and app.
 - **Top-level shape rejection** — Rejects null, arrays, and strings at the top level.
 - **Missing endpoints** — Rejects configs without an `endpoints` field.
 - **Endpoint host validation** — Rejects empty hosts, oversized hosts (>253 chars), and hosts with whitespace, newlines, tabs, slashes, or colons (prevents `/etc/hosts` injection).
 - **Port boundary validation** — Rejects port 0, negative ports, ports > 65535, non-integer ports, and NaN.
 - **Endpoint type checking** — Rejects non-object endpoint entries.
 - **Secrets type checking** — Rejects non-object secrets, array secrets, and non-string secret values.
-- **log_level type checking** — Rejects non-string log_level values.
+- **logLevel type checking** — Rejects non-string logLevel values.
 - **App type checking** — Rejects non-object and array app values.
 - **Secrets isolation** — Verifies that config secrets are NOT injected into `process.env` (prevents host from overwriting internal env vars like `NSM_PROXY_PATH`).
 
@@ -312,6 +359,7 @@ cargo test --locked --manifest-path tools/nsm-proxy/Cargo.toml  # Rust (16 tests
 - **Error suppression in enclave mode** — Exceptions return generic "internal error" (not the actual message) when running as enclave; dev mode exposes the real message.
 - **Concurrent requests** — 50 concurrent health checks return consistent results; mixed concurrent GET/POST requests resolve correctly without interference.
 - **Path normalization** — Trailing slashes return 404 (exact match), query strings don't affect routing, double slashes are normalized by the URL parser.
+- **Standalone boot()** — `boot()` returns a valid context with all crypto functions, context can sign and verify, context works with a custom `Bun.serve()` instance (framework-agnostic pattern).
 
 ### TypeScript — NSM Proxy Client (`tests/nsm.test.ts`)
 
@@ -327,7 +375,7 @@ cargo test --locked --manifest-path tools/nsm-proxy/Cargo.toml  # Rust (16 tests
 
 ### Go — Traffic Proxy (`tools/traffic-proxy/main_test.go`)
 
-- **Config JSON parsing** — Parses valid JSON with endpoints, http_vsock_port, and http_tcp_port.
+- **Config JSON parsing** — Parses valid JSON with endpoints, httpVsockPort, and httpTcpPort.
 - **Empty endpoints** — Handles configs with zero endpoints.
 - **Missing fields** — Missing JSON fields default to zero values.
 - **Invalid JSON** — Rejects malformed JSON input.

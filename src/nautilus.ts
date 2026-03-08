@@ -1,19 +1,31 @@
 /**
  * Nautilus — TypeScript enclave framework.
  *
- * Usage:
+ * Two usage patterns:
+ *
+ * **1. Standalone boot (bring your own framework):**
+ *
+ * ```ts
+ * import { boot } from "./nautilus.ts";
+ * import { Hono } from "hono";
+ *
+ * const ctx = await boot({ port: 3000 });
+ * const app = new Hono();
+ *
+ * app.get("/health", (c) => c.json({ pk: ctx.publicKey }));
+ *
+ * export default { port: 3000, hostname: "127.0.0.1", fetch: app.fetch };
+ * ```
+ *
+ * **2. Built-in server (batteries included):**
  *
  * ```ts
  * import { Nautilus } from "./nautilus.ts";
  *
  * const app = new Nautilus();
- *
- * // Add your routes here
  * app.post("/my_endpoint", async (req, ctx) => {
- *   const body = await req.json();
- *   return Response.json({ received: body });
+ *   return Response.json({ received: await req.json() });
  * });
- *
  * app.start();
  * ```
  */
@@ -54,7 +66,101 @@ export interface NautilusContext {
   blake2b256: typeof blake2b256;
   /** SHA-256 hash. */
   sha256: typeof sha256Hash;
+  /** Clean up resources (NSM proxy). Call when shutting down. */
+  shutdown(): void;
 }
+
+export interface BootOptions {
+  /** Port the HTTP server will listen on (default: 3000). */
+  port?: number;
+  /** Path to a local config file for dev mode. */
+  devConfigPath?: string;
+  /** @internal Override enclave detection for testing. */
+  _testAsEnclave?: boolean;
+}
+
+/** Spawn the traffic proxy as a child process. */
+function startTrafficProxy(config: BootConfig, httpPort: number): void {
+  const proxyConfig = JSON.stringify({
+    httpVsockPort: httpPort,
+    httpTcpPort: httpPort,
+    endpoints: config.endpoints,
+  });
+
+  const proc = Bun.spawn(["/traffic-proxy", "enclave"], {
+    stdin: new Blob([proxyConfig]),
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+
+  proc.exited.then((code) => {
+    console.error(`[nautilus] traffic-proxy exited with code ${code}`);
+    process.exit(1);
+  });
+
+  console.log(`[nautilus] traffic-proxy started (pid ${proc.pid})`);
+}
+
+/**
+ * Boot the enclave and return a context object.
+ *
+ * Use this when you want to bring your own HTTP framework
+ * (Hono, Elysia, or bare Bun.serve). Nautilus handles enclave
+ * boot, networking, key generation, and attestation — you
+ * handle routing.
+ *
+ * In enclave mode:
+ *   1. Set up loopback networking
+ *   2. Receive config from host via VSOCK:7777
+ *   3. Spawn traffic proxy (handles /etc/hosts, TCP↔VSOCK bridges)
+ *
+ * In dev mode:
+ *   1. Read config from file or use defaults
+ */
+export async function boot(options: BootOptions = {}): Promise<NautilusContext> {
+  const port = options.port ?? 3000;
+  const inEnclave = options._testAsEnclave || isEnclave();
+  let config: BootConfig;
+
+  if (inEnclave && !options._testAsEnclave) {
+    console.log("[nautilus] booting in enclave mode");
+    setupLoopback();
+    config = await receiveBootConfig();
+
+    // Spawn traffic proxy — handles /etc/hosts, inbound + outbound bridges
+    startTrafficProxy(config, port);
+  } else {
+    console.log("[nautilus] booting in dev mode");
+    config = await devBootConfig(options.devConfigPath);
+  }
+
+  // Generate ephemeral keypair (mix NSM hardware entropy when available)
+  const nsmEntropy = inEnclave ? await getHardwareRandom() : null;
+  const keypair = generateKeypair(nsmEntropy);
+  const publicKey = toHex(keypair.publicKey);
+  const address = suiAddress(keypair.publicKey);
+
+  console.log(`[nautilus] public key: ${publicKey}`);
+  console.log(`[nautilus] address:    ${address}`);
+
+  return {
+    publicKey,
+    address,
+    config,
+    inEnclave,
+    sign: (msg) => sign(keypair, msg),
+    attest: () => getAttestation(keypair.publicKey),
+    toHex,
+    fromHex,
+    blake2b256,
+    sha256: sha256Hash,
+    shutdown: () => stopNsmProxy(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Built-in server (batteries-included option)
+// ---------------------------------------------------------------------------
 
 type RouteHandler = (
   req: Request,
@@ -73,6 +179,7 @@ export class Nautilus {
   private maxBodySize = Number(process.env.MAX_BODY_SIZE) || 10 * 1024 * 1024;
   private configPath?: string;
   private server?: ReturnType<typeof Bun.serve>;
+  private ctx?: NautilusContext;
   /** @internal Override enclave detection for testing error suppression. */
   _testAsEnclave = false;
 
@@ -81,11 +188,12 @@ export class Nautilus {
     return this.server?.port;
   }
 
-  /** Stop the HTTP server. */
+  /** Stop the HTTP server and clean up resources. */
   stop(): void {
     this.server?.stop(true);
     this.server = undefined;
-    stopNsmProxy();
+    this.ctx?.shutdown();
+    this.ctx = undefined;
   }
 
   /**
@@ -124,78 +232,16 @@ export class Nautilus {
     return this;
   }
 
-  /** Spawn the traffic proxy as a child process. */
-  private startTrafficProxy(config: BootConfig, httpPort: number): void {
-    const proxyConfig = JSON.stringify({
-      http_vsock_port: httpPort,
-      http_tcp_port: httpPort,
-      endpoints: config.endpoints,
-    });
-
-    const proc = Bun.spawn(["/traffic-proxy", "enclave"], {
-      stdin: new Blob([proxyConfig]),
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-
-    proc.exited.then((code) => {
-      console.error(`[nautilus] traffic-proxy exited with code ${code}`);
-      process.exit(1);
-    });
-
-    console.log(`[nautilus] traffic-proxy started (pid ${proc.pid})`);
-  }
-
   /**
-   * Boot the enclave and start the HTTP server.
-   *
-   * In enclave mode:
-   *   1. Set up loopback networking
-   *   2. Receive config from host via VSOCK:7777
-   *   3. Spawn traffic proxy (handles /etc/hosts, TCP↔VSOCK bridges)
-   *   4. Start HTTP server on TCP:3000
-   *
-   * In dev mode:
-   *   1. Read config from file or use defaults
-   *   2. Start HTTP server on TCP:3000
+   * Boot the enclave and start the built-in HTTP server.
    */
   async start(): Promise<void> {
-    const inEnclave = this._testAsEnclave || isEnclave();
-    let config: BootConfig;
-
-    if (inEnclave && !this._testAsEnclave) {
-      console.log("[nautilus] booting in enclave mode");
-      setupLoopback();
-      config = await receiveBootConfig();
-
-      // Spawn traffic proxy — handles /etc/hosts, inbound + outbound bridges
-      this.startTrafficProxy(config, this.port);
-    } else {
-      console.log("[nautilus] booting in dev mode");
-      config = await devBootConfig(this.configPath);
-    }
-
-    // Generate ephemeral keypair (mix NSM hardware entropy when available)
-    const nsmEntropy = inEnclave ? await getHardwareRandom() : null;
-    const keypair = generateKeypair(nsmEntropy);
-    const publicKey = toHex(keypair.publicKey);
-    const address = suiAddress(keypair.publicKey);
-
-    console.log(`[nautilus] public key: ${publicKey}`);
-    console.log(`[nautilus] address:    ${address}`);
-
-    const ctx: NautilusContext = {
-      publicKey,
-      address,
-      config,
-      inEnclave,
-      sign: (msg) => sign(keypair, msg),
-      attest: () => getAttestation(keypair.publicKey),
-      toHex,
-      fromHex,
-      blake2b256,
-      sha256: sha256Hash,
-    };
+    const ctx = await boot({
+      port: this.port,
+      devConfigPath: this.configPath,
+      _testAsEnclave: this._testAsEnclave,
+    });
+    this.ctx = ctx;
 
     // Built-in routes
     this.get("/health_check", (_req, ctx) => {
@@ -220,11 +266,12 @@ export class Nautilus {
 
     // Start HTTP server
     const routes = this.routes;
+    const inEnclave = ctx.inEnclave;
     this.server = Bun.serve({
       port: this.port,
       hostname: "127.0.0.1",
       maxRequestBodySize: this.maxBodySize,
-      development: false, // no dev error pages in production
+      development: false,
       async fetch(req) {
         const url = new URL(req.url);
         const method = req.method;

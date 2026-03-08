@@ -7,7 +7,8 @@
 
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { createServer } from "net";
-import { Nautilus } from "../src/nautilus.ts";
+import { Nautilus, boot } from "../src/nautilus.ts";
+import type { NautilusContext } from "../src/nautilus.ts";
 
 let baseUrl: string;
 let app: Nautilus;
@@ -334,5 +335,56 @@ describe("path normalization", () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.pk).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+describe("standalone boot()", () => {
+  let ctx: NautilusContext;
+
+  afterAll(() => ctx?.shutdown());
+
+  test("returns a valid context", async () => {
+    ctx = await boot();
+    expect(ctx.publicKey).toMatch(/^[0-9a-f]{64}$/);
+    expect(ctx.address).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(ctx.inEnclave).toBe(false);
+    expect(ctx.config.endpoints).toEqual([]);
+    expect(typeof ctx.sign).toBe("function");
+    expect(typeof ctx.attest).toBe("function");
+    expect(typeof ctx.shutdown).toBe("function");
+    expect(typeof ctx.toHex).toBe("function");
+    expect(typeof ctx.fromHex).toBe("function");
+    expect(typeof ctx.blake2b256).toBe("function");
+    expect(typeof ctx.sha256).toBe("function");
+  });
+
+  test("context can sign and verify", async () => {
+    const msg = ctx.blake2b256(new Uint8Array([1, 2, 3]));
+    const sig = ctx.sign(msg);
+    expect(sig).toBeInstanceOf(Uint8Array);
+    expect(sig.length).toBe(64);
+
+    const { verify, fromHex } = await import("../src/core/crypto.ts");
+    expect(verify(fromHex(ctx.publicKey), msg, sig)).toBe(true);
+  });
+
+  test("context works with custom Bun.serve()", async () => {
+    const port = await getFreePort();
+    const server = Bun.serve({
+      port,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        return Response.json({ pk: ctx.publicKey, address: ctx.address });
+      },
+    });
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${server.port}/anything`);
+      const data = await res.json();
+      expect(data.pk).toBe(ctx.publicKey);
+      expect(data.address).toBe(ctx.address);
+    } finally {
+      server.stop(true);
+    }
   });
 });

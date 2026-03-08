@@ -9,7 +9,7 @@ export interface Endpoint {
   /** Domain name (e.g. "fullnode.testnet.sui.io") */
   host: string;
   /** VSOCK port on the parent VM that forwards to this host:443 */
-  vsock_port: number;
+  vsockPort: number;
 }
 
 export interface BootConfig {
@@ -18,7 +18,7 @@ export interface BootConfig {
   /** Optional secrets as key-value pairs. */
   secrets?: Record<string, string>;
   /** Log level (default: "info") */
-  log_level?: string;
+  logLevel?: string;
   /** Application-specific config (opaque to the platform layer). */
   app?: Record<string, unknown>;
 }
@@ -40,15 +40,15 @@ export function validateBootConfig(raw: unknown): BootConfig {
     if (ep === null || typeof ep !== "object" || Array.isArray(ep)) {
       throw new Error(`boot config: endpoints[${i}] must be an object`);
     }
-    const { host, vsock_port } = ep as Record<string, unknown>;
+    const { host, vsockPort } = ep as Record<string, unknown>;
     if (typeof host !== "string" || host.length === 0 || host.length > 253) {
       throw new Error(`boot config: endpoints[${i}].host must be a non-empty string (max 253 chars)`);
     }
     if (!/^[a-zA-Z0-9._-]+$/.test(host)) {
       throw new Error(`boot config: endpoints[${i}].host contains invalid characters`);
     }
-    if (typeof vsock_port !== "number" || !Number.isInteger(vsock_port) || vsock_port < 1 || vsock_port > 65535) {
-      throw new Error(`boot config: endpoints[${i}].vsock_port must be an integer in 1..65535`);
+    if (typeof vsockPort !== "number" || !Number.isInteger(vsockPort) || vsockPort < 1 || vsockPort > 65535) {
+      throw new Error(`boot config: endpoints[${i}].vsockPort must be an integer in 1..65535`);
     }
   }
 
@@ -64,9 +64,9 @@ export function validateBootConfig(raw: unknown): BootConfig {
     }
   }
 
-  // log_level (optional, string)
-  if (obj.log_level !== undefined && typeof obj.log_level !== "string") {
-    throw new Error("boot config: log_level must be a string");
+  // logLevel (optional, string)
+  if (obj.logLevel !== undefined && typeof obj.logLevel !== "string") {
+    throw new Error("boot config: logLevel must be a string");
   }
 
   // app (optional, object)
@@ -123,7 +123,7 @@ export async function devBootConfig(path?: string): Promise<BootConfig> {
   }
   return {
     endpoints: [],
-    log_level: process.env.LOG_LEVEL ?? "debug",
+    logLevel: process.env.LOG_LEVEL ?? "debug",
     app: {},
   };
 }
