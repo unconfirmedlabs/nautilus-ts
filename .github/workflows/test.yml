@@ -10,8 +10,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
       - uses: oven-sh/setup-bun@ecf28ddc73e819eb6fa29df6b34ef8921c743461 # pin@v2.1.3
-      - run: bun install --frozen-lockfile --no-progress
+      - run: bun install --frozen-lockfile --no-progress --ignore-scripts
       - run: bun test
+      - run: bun scripts/check-reproducibility.ts
 
   rust:
     runs-on: ubuntu-latest
@@ -38,5 +39,34 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # pin@v4
         with:
           name: eif
-          path: out/nitro.eif
+          path: |
+            out/nitro.eif
+            out/nitro.pcrs
           retention-days: 1
+
+  smoke-test:
+    needs: [build-eif]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
+        with:
+          name: eif
+          path: out/
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # pin@v5.5.0
+        with:
+          go-version-file: tools/traffic-proxy/go.mod
+      - name: Build traffic-proxy for host
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o out/traffic-proxy ./tools/traffic-proxy
+      - name: Run enclave smoke test on EC2 spot
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          EC2_KEY_NAME: ${{ vars.EC2_KEY_NAME }}
+          EC2_SECURITY_GROUP: ${{ vars.EC2_SECURITY_GROUP }}
+          EC2_SUBNET: ${{ vars.EC2_SUBNET }}
+        run: bash scripts/ci-smoke-test.sh
