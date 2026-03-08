@@ -103,9 +103,7 @@ ssh ec2-user@<host> "cd nautilus-ts && scripts/deploy.sh"
 
 ```
 src/
-  server.ts          # Example: built-in router
-  server-hono.ts     # Example: Hono integration
-  server-elysia.ts   # Example: Elysia integration
+  server.ts          # Your application entry point
   nautilus.ts        # Framework: boot(), Nautilus class, context
   core/
     config.ts        # Boot config via traffic-proxy VSOCK:7777
