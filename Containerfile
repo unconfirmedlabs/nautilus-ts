@@ -118,6 +118,7 @@ WORKDIR /rootfs
 COPY --from=build /nitro.eif .
 COPY --from=build /nitro.pcrs .
 COPY --from=build /build_cpio/rootfs.cpio .
+COPY --from=go-build /build/argonaut .
 
 FROM scratch AS package
 COPY --from=install /rootfs .
