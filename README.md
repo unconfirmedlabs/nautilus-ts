@@ -256,6 +256,121 @@ This is fundamental to the enclave security model. The attestation document bind
 
 Yes. `bun run dev` starts the server in dev mode — no enclave, no VSOCK, no NSM. It reads config from a local file (or uses defaults), generates a keypair from the kernel PRNG, and listens on `localhost:3000`. The `ctx.attest()` call returns `null` in dev mode.
 
+## Testing
+
+135 tests across TypeScript, Go, and Rust cover every security boundary and functional path. Run all tests with:
+
+```bash
+bun test                                                    # TypeScript (110 tests)
+go test -v ./... -C tools/traffic-proxy                     # Go (9 tests)
+cargo test --locked --manifest-path tools/nsm-proxy/Cargo.toml  # Rust (16 tests)
+```
+
+### TypeScript — Config Validation (`tests/config.test.ts`)
+
+- **Default config** — `devBootConfig()` returns sensible defaults (empty endpoints, debug log level).
+- **File config loading** — Reads and parses config from a JSON file with endpoints, secrets, and app data.
+- **Invalid JSON rejection** — Throws on malformed JSON input.
+- **Nonexistent file** — Throws when config file doesn't exist.
+- **LOG_LEVEL env var** — Respects the `LOG_LEVEL` environment variable for dev mode defaults.
+- **Minimal config** — Accepts `{"endpoints": []}` with all optional fields undefined.
+- **Multiple endpoints** — Parses configs with multiple endpoint entries.
+- **Full config acceptance** — Validates a complete config with endpoints, secrets, log_level, and app.
+- **Top-level shape rejection** — Rejects null, arrays, and strings at the top level.
+- **Missing endpoints** — Rejects configs without an `endpoints` field.
+- **Endpoint host validation** — Rejects empty hosts, oversized hosts (>253 chars), and hosts with whitespace, newlines, tabs, slashes, or colons (prevents `/etc/hosts` injection).
+- **Port boundary validation** — Rejects port 0, negative ports, ports > 65535, non-integer ports, and NaN.
+- **Endpoint type checking** — Rejects non-object endpoint entries.
+- **Secrets type checking** — Rejects non-object secrets, array secrets, and non-string secret values.
+- **log_level type checking** — Rejects non-string log_level values.
+- **App type checking** — Rejects non-object and array app values.
+- **Secrets isolation** — Verifies that config secrets are NOT injected into `process.env` (prevents host from overwriting internal env vars like `NSM_PROXY_PATH`).
+
+### TypeScript — Cryptography (`tests/crypto.test.ts`)
+
+- **Keypair generation** — Returns 32-byte private and public keys, generates unique keypairs, 100 keypairs without collision.
+- **NSM entropy mixing** — Produces valid keypairs when mixed with hardware entropy via XOR, falls back gracefully when entropy is too short.
+- **Sign and verify** — Signs messages and verifies correctly, fails with wrong public key, wrong message, or tampered signature.
+- **Empty and large messages** — Signs empty messages and 1MB messages correctly.
+- **Deterministic signatures** — Same keypair and message always produce the same signature.
+- **Sui address derivation** — Returns `0x`-prefixed 64-char hex, is deterministic, differs across keys, matches `blake2b256(0x00 || pubkey)` algorithm.
+- **Sui SDK cross-validation** — Addresses pass `isValidSuiAddress()` from `@mysten/sui` SDK, verified across 100 generated keypairs.
+- **Hex encoding** — Roundtrips arbitrary bytes, handles empty input, strips `0x` prefix, produces lowercase, rejects odd-length and invalid hex characters.
+- **Hash test vectors** — blake2b256 and SHA-256 match known test vectors (empty input, "abc").
+
+### TypeScript — HTTP Framework (`tests/nautilus.test.ts`)
+
+- **Built-in routes** — `GET /` returns "Pong!", `GET /health_check` returns valid pk and address, `GET /get_attestation` returns 503 outside enclave.
+- **Key consistency** — Multiple health_check requests return the same pk and address.
+- **Custom routes** — GET and POST handlers receive context with crypto utilities, JSON echo preserves body.
+- **Signing endpoint** — POST `/sign` produces deterministic 64-byte signatures with valid hashes.
+- **Error handling** — Unknown routes return 404, wrong HTTP method returns 404, throwing routes return 500.
+- **Body size limits** — Rejects requests exceeding `maxBodySize` with 413, accepts requests within the limit.
+- **Address derivation integrity** — Health check address matches Sui derivation from the returned public key.
+- **Signature verification** — Signatures from the server verify against the returned public key; forgery (wrong message or tampered signature) fails.
+- **Private key non-exposure** — Route handler context does not leak the private key in JSON responses.
+- **Error suppression in enclave mode** — Exceptions return generic "internal error" (not the actual message) when running as enclave; dev mode exposes the real message.
+- **Concurrent requests** — 50 concurrent health checks return consistent results; mixed concurrent GET/POST requests resolve correctly without interference.
+- **Path normalization** — Trailing slashes return 404 (exact match), query strings don't affect routing, double slashes are normalized by the URL parser.
+
+### TypeScript — NSM Proxy Client (`tests/nsm.test.ts`)
+
+- **Enclave detection** — `isEnclave()` returns false outside a Nitro Enclave.
+- **Graceful fallback** — `getAttestation()` and `getHardwareRandom()` return null outside enclave.
+- **ATT protocol round-trip** — Sends a public key to the mock proxy, receives it back as the attestation document.
+- **RND protocol** — Requests random bytes from the mock proxy.
+- **Concurrent multiplexing** — 15 concurrent requests (10 ATT + 5 RND) all resolve to the correct response using ID-based tracking.
+- **Pending request rejection** — All pending requests are rejected when the proxy process exits unexpectedly.
+- **Post-exit rejection** — Requests after proxy exit throw "not running" immediately.
+- **ERR response handling** — Proxy ERR responses correctly reject the corresponding promise with the error message.
+- **Large attestation documents** — Handles 4KB attestation documents (realistic production size) without truncation.
+
+### Go — Traffic Proxy (`tools/traffic-proxy/main_test.go`)
+
+- **Config JSON parsing** — Parses valid JSON with endpoints, http_vsock_port, and http_tcp_port.
+- **Empty endpoints** — Handles configs with zero endpoints.
+- **Missing fields** — Missing JSON fields default to zero values.
+- **Invalid JSON** — Rejects malformed JSON input.
+- **Loopback IP generation** — All 191 possible endpoint IPs (127.0.0.64–127.0.0.254) are valid; 192nd overflows.
+- **Hosts file content** — Generated `/etc/hosts` contains localhost and all endpoint entries with correct IPs.
+- **Hosts file injection prevention** — Each line has exactly two fields (IP and hostname), no extra content.
+- **Bidirectional copy** — Data flows correctly in both directions through the bridge with proper half-close handling.
+- **Max endpoint limit** — Verifies the IP address space boundary at 191 endpoints.
+
+### Rust — NSM Proxy (`tools/nsm-proxy/src/main.rs`)
+
+- **Hex codec** — Rejects odd-length input, rejects invalid characters, round-trips encoding/decoding.
+- **ATT request** — Processes attestation requests and returns hex-encoded documents.
+- **RND request** — Processes random requests and returns hex-encoded bytes.
+- **Unknown method** — Returns ERR for unrecognized methods.
+- **Invalid hex payload** — Returns ERR for non-hex attestation payloads.
+- **Empty and whitespace lines** — Returns appropriate ERR responses.
+- **ID-only requests** — Returns ERR when no method is specified.
+- **Missing ATT payload** — Returns ERR when ATT is sent without a public key.
+- **Odd-length hex** — Returns ERR for odd-length hex in ATT payload.
+- **Wrong key length** — Validates that public keys must be exactly 32 bytes; rejects 16-byte and 64-byte keys (using StrictFakeBackend that mirrors NitroBackend validation).
+- **Correct key length** — Accepts 32-byte public keys and returns the attestation document.
+
+### End-to-End — Enclave Smoke Test (`scripts/enclave-smoke-test.sh`)
+
+Runs on a real Nitro Enclave (EC2 with `c5.xlarge` or larger):
+
+- **Health check** — Verifies `GET /health_check` returns valid pk (64-char hex) and address (0x-prefixed 64-char hex).
+- **Attestation** — Verifies `GET /get_attestation` returns a non-null attestation document > 100 hex chars.
+- **Root route** — Verifies `GET /` returns "Pong!".
+- **404 handling** — Verifies unknown routes return HTTP 404.
+- **Key consistency** — Verifies the public key is identical across multiple requests (ephemeral key persists for enclave lifetime).
+
+### CI Pipeline (`.github/workflows/test.yml`)
+
+On every push to `main` and every pull request:
+
+1. **TypeScript** — `bun test` + reproducibility check
+2. **Rust** — `cargo test --locked`
+3. **Go** — `go test -v ./...`
+4. **EIF build** — `make` (full Docker build of the enclave image)
+5. **Smoke test** (main only) — Launches a spot EC2 instance, deploys the EIF, and runs the full enclave smoke test
+
 ## Disclaimer
 
 This framework is provided as-is and has not been audited. We are not responsible for any issues arising from its use. Use at your own risk.

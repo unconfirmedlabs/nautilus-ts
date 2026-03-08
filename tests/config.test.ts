@@ -200,4 +200,39 @@ describe("validateBootConfig", () => {
     await Bun.write(tmpPath, JSON.stringify({ endpoints: "not-an-array" }));
     expect(devBootConfig(tmpPath)).rejects.toThrow("endpoints must be an array");
   });
+
+  test("rejects endpoint host with slash", () => {
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com/path", vsock_port: 100 }] })).toThrow("invalid characters");
+  });
+
+  test("rejects endpoint host with colon", () => {
+    expect(() => validateBootConfig({ endpoints: [{ host: "evil.com:443", vsock_port: 100 }] })).toThrow("invalid characters");
+  });
+
+  test("accepts endpoint with port 1", () => {
+    expect(validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 1 }] })).toBeDefined();
+  });
+
+  test("accepts endpoint with port 65535", () => {
+    expect(validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: 65535 }] })).toBeDefined();
+  });
+
+  test("rejects endpoint with NaN port", () => {
+    expect(() => validateBootConfig({ endpoints: [{ host: "sui.io", vsock_port: NaN }] })).toThrow("vsock_port must be an integer");
+  });
+});
+
+describe("secrets isolation", () => {
+  test("secrets are not injected into process.env", async () => {
+    const uniqueKey = `NAUTILUS_TEST_SECRET_${Date.now()}`;
+    const tmpPath = "/tmp/nautilus-test-secrets-isolation.json";
+    await Bun.write(tmpPath, JSON.stringify({
+      endpoints: [],
+      secrets: { [uniqueKey]: "should-not-leak" },
+    }));
+
+    const config = await devBootConfig(tmpPath);
+    expect(config.secrets?.[uniqueKey]).toBe("should-not-leak");
+    expect(process.env[uniqueKey]).toBeUndefined();
+  });
 });

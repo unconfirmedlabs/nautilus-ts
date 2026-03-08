@@ -16,6 +16,7 @@ import {
   blake2b256,
   sha256Hash,
 } from "../src/core/crypto.ts";
+import { isValidSuiAddress } from "@mysten/sui/utils";
 
 describe("generateKeypair", () => {
   test("returns 32-byte private key and 32-byte public key", () => {
@@ -176,6 +177,20 @@ describe("suiAddress", () => {
     const expected = "0x" + toHex(hash);
 
     expect(suiAddress(kp.publicKey)).toBe(expected);
+  });
+
+  test("produces valid Sui address per @mysten/sui SDK", () => {
+    const kp = generateKeypair();
+    const addr = suiAddress(kp.publicKey);
+    expect(isValidSuiAddress(addr)).toBe(true);
+  });
+
+  test("100 generated addresses are all valid Sui addresses", () => {
+    for (let i = 0; i < 100; i++) {
+      const kp = generateKeypair();
+      const addr = suiAddress(kp.publicKey);
+      expect(isValidSuiAddress(addr)).toBe(true);
+    }
   });
 });
 

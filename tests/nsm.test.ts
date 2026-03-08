@@ -105,4 +105,66 @@ describe("NsmProxyClient", () => {
 
     expect(client.getAttestation(new Uint8Array(32))).rejects.toThrow("not running");
   });
+
+  test("rejects on proxy ERR response", async () => {
+    // The mock proxy responds with ERR for the "FAIL" method.
+    // We need to send a raw FAIL request — use sendRequest indirectly.
+    // Since the client only exposes ATT and RND, we test by sending
+    // a request that the real proxy would reject (e.g., invalid hex).
+    // Use a custom mock that always returns ERR.
+    const errMock = resolve(import.meta.dir, "fixtures/mock-nsm-err.ts");
+    await Bun.write(errMock, `
+      const reader = Bun.stdin.stream().getReader();
+      const decoder = new TextDecoder();
+      let buffered = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+        for (;;) {
+          const nl = buffered.indexOf("\\n");
+          if (nl === -1) break;
+          const line = buffered.slice(0, nl).trim();
+          buffered = buffered.slice(nl + 1);
+          if (!line) continue;
+          const id = line.split(" ")[0];
+          process.stdout.write(id + " ERR simulated_failure\\n");
+        }
+      }
+    `);
+    client = new NsmProxyClient("bun", [errMock]);
+
+    await expect(client.getAttestation(new Uint8Array(32))).rejects.toThrow("simulated_failure");
+    await expect(client.getRandom()).rejects.toThrow("simulated_failure");
+  });
+
+  test("handles large attestation documents", async () => {
+    // Production attestation docs are 3-5KB. Test with a mock that returns large hex.
+    const largeMock = resolve(import.meta.dir, "fixtures/mock-nsm-large.ts");
+    const largeHex = "ab".repeat(4096); // 4KB attestation doc
+    await Bun.write(largeMock, `
+      const reader = Bun.stdin.stream().getReader();
+      const decoder = new TextDecoder();
+      let buffered = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+        for (;;) {
+          const nl = buffered.indexOf("\\n");
+          if (nl === -1) break;
+          const line = buffered.slice(0, nl).trim();
+          buffered = buffered.slice(nl + 1);
+          if (!line) continue;
+          const id = line.split(" ")[0];
+          process.stdout.write(id + " OK ${largeHex}\\n");
+        }
+      }
+    `);
+    client = new NsmProxyClient("bun", [largeMock]);
+
+    const result = await client.getAttestation(new Uint8Array(32));
+    expect(result.length).toBe(4096);
+    expect(result.every((b) => b === 0xab)).toBe(true);
+  });
 });

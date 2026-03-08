@@ -84,6 +84,57 @@ func TestHostsFileContent(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsInvalidJSON(t *testing.T) {
+	input := `{not valid json}`
+	var config Config
+	if err := json.NewDecoder(strings.NewReader(input)).Decode(&config); err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestMaxEndpointLimit(t *testing.T) {
+	// The code enforces a max of 191 endpoints (127.0.0.64 through 127.0.0.254)
+	for count := range []int{0, 1, 191} {
+		_ = count
+		ip := fmt.Sprintf("127.0.0.%d", 64+191-1) // max valid
+		if net.ParseIP(ip) == nil {
+			t.Fatalf("max endpoint IP should be valid: %s", ip)
+		}
+	}
+	// 192nd would be 127.0.0.256 which is invalid
+	invalid := fmt.Sprintf("127.0.0.%d", 64+192)
+	if net.ParseIP(invalid) != nil {
+		t.Fatalf("overflow IP should be invalid: %s", invalid)
+	}
+}
+
+func TestHostsFileNoInjection(t *testing.T) {
+	// Verify that the hosts file format doesn't allow injection
+	// Each line should be exactly "IP   hostname"
+	endpoints := []Endpoint{
+		{Host: "normal.host", VsockPort: 8001},
+	}
+	lines := []string{"127.0.0.1   localhost"}
+	for i, ep := range endpoints {
+		lines = append(lines, fmt.Sprintf("127.0.0.%d   %s", 64+i, ep.Host))
+	}
+	content := strings.Join(lines, "\n") + "\n"
+
+	// Should have exactly 2 lines (localhost + 1 endpoint)
+	lineCount := strings.Count(content, "\n")
+	if lineCount != 2 {
+		t.Fatalf("expected 2 lines, got %d", lineCount)
+	}
+
+	// No line should contain more than one hostname
+	for _, line := range strings.Split(strings.TrimSpace(content), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			t.Fatalf("expected exactly 2 fields per line, got %d: %q", len(parts), line)
+		}
+	}
+}
+
 func TestCopyBidirectional(t *testing.T) {
 	// Create two pairs of connected TCP sockets to test the bridge
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

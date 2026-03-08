@@ -200,4 +200,78 @@ mod tests {
         let response = handle_line(&FakeBackend, "4 ATT zz");
         assert_eq!(response, "4 ERR invalid_hex");
     }
+
+    #[test]
+    fn handle_empty_line() {
+        let response = handle_line(&FakeBackend, "");
+        assert_eq!(response, "0 ERR empty_request");
+    }
+
+    #[test]
+    fn handle_whitespace_only() {
+        let response = handle_line(&FakeBackend, "   ");
+        assert_eq!(response, "0 ERR empty_request");
+    }
+
+    #[test]
+    fn handle_id_only() {
+        let response = handle_line(&FakeBackend, "5");
+        assert_eq!(response, "5 ERR invalid_request");
+    }
+
+    #[test]
+    fn handle_att_missing_payload() {
+        let response = handle_line(&FakeBackend, "6 ATT");
+        assert_eq!(response, "6 ERR missing_public_key");
+    }
+
+    #[test]
+    fn handle_att_empty_payload() {
+        let response = handle_line(&FakeBackend, "7 ATT ");
+        assert_eq!(response, "7 ERR missing_public_key");
+    }
+
+    #[test]
+    fn handle_att_odd_length_hex() {
+        let response = handle_line(&FakeBackend, "8 ATT abc");
+        assert_eq!(response, "8 ERR invalid_hex");
+    }
+
+    struct StrictFakeBackend;
+
+    impl NsmBackend for StrictFakeBackend {
+        fn get_attestation(&self, public_key: &[u8]) -> Result<Vec<u8>, &'static str> {
+            if public_key.len() != 32 {
+                return Err("invalid_public_key_length");
+            }
+            Ok(public_key.to_vec())
+        }
+
+        fn get_random(&self) -> Result<Vec<u8>, &'static str> {
+            Ok(vec![0xca, 0xfe])
+        }
+    }
+
+    #[test]
+    fn handle_att_wrong_key_length_short() {
+        // 16 bytes (too short)
+        let short_key = "aa".repeat(16);
+        let response = handle_line(&StrictFakeBackend, &format!("9 ATT {short_key}"));
+        assert_eq!(response, "9 ERR invalid_public_key_length");
+    }
+
+    #[test]
+    fn handle_att_wrong_key_length_long() {
+        // 64 bytes (too long)
+        let long_key = "bb".repeat(64);
+        let response = handle_line(&StrictFakeBackend, &format!("10 ATT {long_key}"));
+        assert_eq!(response, "10 ERR invalid_public_key_length");
+    }
+
+    #[test]
+    fn handle_att_correct_key_length() {
+        let key = "cc".repeat(32);
+        let response = handle_line(&StrictFakeBackend, &format!("11 ATT {key}"));
+        assert_eq!(response, format!("11 OK {key}"));
+    }
 }

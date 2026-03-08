@@ -246,3 +246,93 @@ describe("security", () => {
     expect(Object.keys(data).sort()).toEqual(["address", "pk"]);
   });
 });
+
+describe("error suppression in enclave mode", () => {
+  let enclaveApp: Nautilus;
+  let enclaveUrl: string;
+
+  beforeAll(async () => {
+    enclaveApp = new Nautilus();
+    enclaveApp._testAsEnclave = true;
+    enclaveApp.setPort(await getFreePort());
+
+    enclaveApp.get("/throws", () => {
+      throw new Error("secret implementation detail");
+    });
+
+    await enclaveApp.start();
+    enclaveUrl = `http://127.0.0.1:${enclaveApp.listeningPort}`;
+  });
+
+  afterAll(() => enclaveApp?.stop());
+
+  test("hides exception message in enclave mode", async () => {
+    const res = await fetch(`${enclaveUrl}/throws`);
+    expect(res.status).toBe(500);
+    const data = await res.json();
+    expect(data.error).toBe("internal error");
+    expect(data.error).not.toContain("secret implementation detail");
+  });
+
+  test("dev mode exposes exception message", async () => {
+    // The main app (dev mode) should expose the error
+    const res = await fetch(`${baseUrl}/throws`);
+    const data = await res.json();
+    expect(data.error).toBe("intentional test error");
+  });
+});
+
+describe("concurrent requests", () => {
+  test("handles 50 concurrent requests correctly", async () => {
+    const requests = Array.from({ length: 50 }, (_, i) =>
+      fetch(`${baseUrl}/health_check`).then((r) => r.json()),
+    );
+    const results = await Promise.all(requests);
+
+    // All should return same pk and valid format
+    const firstPk = results[0].pk;
+    for (const result of results) {
+      expect(result.pk).toBe(firstPk);
+      expect(result.address).toMatch(/^0x[0-9a-f]{64}$/);
+    }
+  });
+
+  test("handles mixed concurrent GET and POST", async () => {
+    const requests = [
+      fetch(`${baseUrl}/health_check`).then((r) => r.json()),
+      fetch(`${baseUrl}/sign`, { method: "POST", body: new Uint8Array([1]) }).then((r) => r.json()),
+      fetch(`${baseUrl}/`).then((r) => r.text()),
+      fetch(`${baseUrl}/echo`).then((r) => r.json()),
+      fetch(`${baseUrl}/sign`, { method: "POST", body: new Uint8Array([2]) }).then((r) => r.json()),
+    ];
+    const [health, sign1, root, echo, sign2] = await Promise.all(requests);
+
+    expect(health.pk).toMatch(/^[0-9a-f]{64}$/);
+    expect(sign1.signature).toMatch(/^[0-9a-f]{128}$/);
+    expect(root).toBe("Pong!");
+    expect(echo.pk).toBe(health.pk);
+    expect(sign2.signature).toMatch(/^[0-9a-f]{128}$/);
+    // Different inputs should produce different signatures
+    expect(sign1.signature).not.toBe(sign2.signature);
+  });
+});
+
+describe("path normalization", () => {
+  test("trailing slash returns 404", async () => {
+    const res = await fetch(`${baseUrl}/health_check/`);
+    expect(res.status).toBe(404);
+  });
+
+  test("double slash is normalized by URL parser", async () => {
+    // URL spec normalizes //health_check to /health_check
+    const res = await fetch(`${baseUrl}//health_check`);
+    expect(res.status).toBe(200);
+  });
+
+  test("query strings don't affect routing", async () => {
+    const res = await fetch(`${baseUrl}/health_check?foo=bar`);
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.pk).toMatch(/^[0-9a-f]{64}$/);
+  });
+});

@@ -73,6 +73,8 @@ export class Nautilus {
   private maxBodySize = Number(process.env.MAX_BODY_SIZE) || 10 * 1024 * 1024;
   private configPath?: string;
   private server?: ReturnType<typeof Bun.serve>;
+  /** @internal Override enclave detection for testing error suppression. */
+  _testAsEnclave = false;
 
   /** Actual port the server is listening on (useful when port 0 is used). */
   get listeningPort(): number | undefined {
@@ -158,10 +160,10 @@ export class Nautilus {
    *   2. Start HTTP server on TCP:3000
    */
   async start(): Promise<void> {
-    const inEnclave = isEnclave();
+    const inEnclave = this._testAsEnclave || isEnclave();
     let config: BootConfig;
 
-    if (inEnclave) {
+    if (inEnclave && !this._testAsEnclave) {
       console.log("[nautilus] booting in enclave mode");
       setupLoopback();
       config = await receiveBootConfig();
