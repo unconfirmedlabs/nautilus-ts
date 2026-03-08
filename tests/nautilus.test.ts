@@ -45,7 +45,13 @@ beforeAll(async () => {
   app = result.app;
   ctx = result.ctx;
 
-  // Custom test routes
+  // App-defined routes (framework only provides GET /attestation)
+  app.get("/", (c) => c.text("Pong!"));
+
+  app.get("/health_check", (c) => {
+    return c.json({ pk: ctx.publicKey, address: ctx.address });
+  });
+
   app.get("/echo", (c) => {
     return c.json({ pk: ctx.publicKey, address: ctx.address });
   });
@@ -86,29 +92,8 @@ afterAll(() => {
 });
 
 describe("built-in routes", () => {
-  test("GET / returns Pong!", async () => {
-    const res = await fetch(`${baseUrl}/`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("Pong!");
-  });
-
-  test("GET /health_check returns pk and address", async () => {
-    const res = await fetch(`${baseUrl}/health_check`);
-    expect(res.status).toBe(200);
-    const data = await res.json();
-    expect(data.pk).toMatch(/^[0-9a-f]{64}$/);
-    expect(data.address).toMatch(/^0x[0-9a-f]{64}$/);
-  });
-
-  test("GET /health_check returns consistent keys", async () => {
-    const r1 = await (await fetch(`${baseUrl}/health_check`)).json();
-    const r2 = await (await fetch(`${baseUrl}/health_check`)).json();
-    expect(r1.pk).toBe(r2.pk);
-    expect(r1.address).toBe(r2.address);
-  });
-
-  test("GET /get_attestation returns 503 outside enclave", async () => {
-    const res = await fetch(`${baseUrl}/get_attestation`);
+  test("GET /attestation returns 503 outside enclave", async () => {
+    const res = await fetch(`${baseUrl}/attestation`);
     expect(res.status).toBe(503);
     const data = await res.json();
     expect(data.error).toBe("not running in enclave");

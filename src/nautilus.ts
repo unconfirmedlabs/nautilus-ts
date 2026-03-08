@@ -67,7 +67,7 @@ export interface BootOptions {
 }
 
 export interface BootResult {
-  /** Hono app with built-in routes (/health_check, /get_attestation). */
+  /** Hono app with GET /attestation (NSM hardware attestation). App owns all other routes. */
   app: Hono;
   /** Enclave context: signing, attestation, config, crypto utilities. */
   ctx: NautilusContext;
@@ -106,7 +106,7 @@ function startArgonaut(config: BootConfig, httpPort: number): void {
  * In dev mode:
  *   1. Read config from file or use defaults
  *
- * Returns a Hono app with built-in routes and error handling,
+ * Returns a Hono app (with GET /attestation for NSM hardware attestation)
  * plus the NautilusContext for signing and attestation.
  */
 export async function boot(options: BootOptions = {}): Promise<BootResult> {
@@ -149,16 +149,11 @@ export async function boot(options: BootOptions = {}): Promise<BootResult> {
     shutdown: () => stopNsmProxy(),
   };
 
-  // Create Hono app with built-in routes and error handling
+  // Create Hono app — only NSM attestation is a framework route.
+  // The app owns all other routes (health_check, business logic, etc.).
   const app = new Hono();
 
-  app.get("/", (c) => c.text("Pong!"));
-
-  app.get("/health_check", (c) =>
-    c.json({ pk: ctx.publicKey, address: ctx.address }),
-  );
-
-  app.get("/get_attestation", async (c) => {
+  app.get("/attestation", async (c) => {
     const doc = await ctx.attest();
     if (!doc) {
       return c.json({ error: "not running in enclave" }, 503);

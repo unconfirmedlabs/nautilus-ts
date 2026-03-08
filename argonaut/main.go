@@ -5,9 +5,11 @@
 //
 // Modes:
 //
-//	argonaut host <tcp-port> <cid> <vsock-port>
-//	    Listen on TCP, forward to VSOCK. Used on the parent EC2 instance
-//	    to bridge inbound HTTP into the enclave.
+//	argonaut host <cid> <config-file>
+//	    Read JSON config, send it to the enclave via VSOCK:7777, then:
+//	    1. Inbound:  TCP listen → VSOCK connect (HTTP into the enclave)
+//	    2. Outbound: VSOCK listen → TCP connect (enclave reaching external services)
+//	    Replaces both the separate config-send step and AWS vsock-proxy.
 //
 //	argonaut enclave
 //	    Read JSON config from stdin, then:
@@ -17,8 +19,8 @@
 //	    Runs inside the Nitro Enclave where there is no network.
 //
 //	argonaut config send <cid> <vsock-port>
-//	    Read stdin and send it to VSOCK:<cid>:<port>. Used on the host
-//	    to deliver boot config to the enclave.
+//	    Read stdin and send it to VSOCK:<cid>:<port>. Low-level utility
+//	    for debugging; normal usage goes through "argonaut host".
 //
 //	argonaut config recv <vsock-port>
 //	    Listen on VSOCK:<port>, accept one connection, read all data,
@@ -65,7 +67,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
-	fmt.Fprintf(os.Stderr, "  %s host <tcp-port> <cid> <vsock-port>\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s host <cid> <config-file>\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s enclave  (reads JSON config from stdin)\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s config send <cid> <vsock-port>  (send stdin to VSOCK)\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s config recv <vsock-port>        (receive from VSOCK to stdout)\n", os.Args[0])
@@ -73,45 +75,145 @@ func usage() {
 	os.Exit(1)
 }
 
-// --- Host mode: TCP listen → VSOCK connect ---
+// --- Host mode: config delivery + inbound/outbound bridges ---
+
+// HostConfig is the config shape used by the host side.
+// Extra fields (secrets, app, logLevel) are ignored — the raw JSON is
+// sent verbatim to the enclave, which parses them separately.
+type HostConfig struct {
+	HTTPPort      uint16     `json:"httpPort"`
+	HTTPVsockPort uint32     `json:"httpVsockPort"`
+	Endpoints     []Endpoint `json:"endpoints"`
+}
+
+const configVsockPort uint32 = 7777
 
 func hostMode() {
-	if len(os.Args) != 5 {
+	if len(os.Args) != 4 {
 		usage()
 	}
 
-	listenPort, err := strconv.ParseUint(os.Args[2], 10, 16)
+	cid, err := strconv.ParseUint(os.Args[2], 10, 32)
 	if err != nil {
-		log.Fatalf("invalid listen port: %s", os.Args[2])
-	}
-	cid, err := strconv.ParseUint(os.Args[3], 10, 32)
-	if err != nil {
-		log.Fatalf("invalid enclave CID: %s", os.Args[3])
-	}
-	vsockPort, err := strconv.ParseUint(os.Args[4], 10, 32)
-	if err != nil {
-		log.Fatalf("invalid VSOCK port: %s", os.Args[4])
+		log.Fatalf("invalid enclave CID: %s", os.Args[2])
 	}
 
-	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", listenPort))
+	configPath := os.Args[3]
+	rawConfig, err := os.ReadFile(configPath)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("failed to read config file: %v", err)
 	}
 
-	log.Printf("TCP:%d → VSOCK:%d:%d", listenPort, cid, vsockPort)
+	var hostCfg HostConfig
+	if err := json.Unmarshal(rawConfig, &hostCfg); err != nil {
+		log.Fatalf("invalid config JSON: %v", err)
+	}
+	if hostCfg.HTTPPort == 0 {
+		log.Fatalf("httpPort is required in config")
+	}
+	if hostCfg.HTTPVsockPort == 0 {
+		log.Fatalf("httpVsockPort is required in config")
+	}
+
+	// Send config to enclave via VSOCK:7777
+	sendConfigVSOCK(uint32(cid), configVsockPort, rawConfig)
+
+	// Start all bridges
+	var wg sync.WaitGroup
+
+	// Inbound: TCP:<httpPort> → VSOCK:<cid>:<httpVsockPort>
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		hostInboundBridge(hostCfg.HTTPPort, uint32(cid), hostCfg.HTTPVsockPort)
+	}()
+
+	// Outbound: for each endpoint, VSOCK:<vsockPort> → TCP:<host>:443
+	for _, ep := range hostCfg.Endpoints {
+		wg.Add(1)
+		go func(ep Endpoint) {
+			defer wg.Done()
+			hostOutboundBridge(ep)
+		}(ep)
+	}
+
+	log.Println("[host] all bridges started")
+	wg.Wait()
+	log.Println("[host] bridge exited unexpectedly")
+	os.Exit(1)
+}
+
+// sendConfigVSOCK sends raw bytes to a VSOCK endpoint.
+func sendConfigVSOCK(cid, port uint32, data []byte) {
+	conn, err := vsock.Dial(cid, port, nil)
+	if err != nil {
+		log.Fatalf("[host] VSOCK dial %d:%d for config: %v", cid, port, err)
+	}
+	if _, err := conn.Write(data); err != nil {
+		conn.Close()
+		log.Fatalf("[host] config write: %v", err)
+	}
+	conn.Close()
+	log.Printf("[host] config sent (%d bytes) to CID %d via VSOCK:%d", len(data), cid, port)
+}
+
+func hostInboundBridge(tcpPort uint16, cid, vsockPort uint32) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", tcpPort))
+	if err != nil {
+		log.Fatalf("[host] failed to listen on TCP:%d: %v", tcpPort, err)
+	}
+	log.Printf("[host] inbound TCP:%d → VSOCK:%d:%d", tcpPort, cid, vsockPort)
 
 	for {
 		tcp, err := ln.Accept()
 		if err != nil {
-			log.Printf("accept error: %v", err)
+			log.Printf("[host] inbound accept error: %v", err)
 			continue
 		}
 		go func() {
-			if err := bridgeToVSOCK(tcp, uint32(cid), uint32(vsockPort)); err != nil {
-				log.Printf("bridge error: %v", err)
+			if err := bridgeToVSOCK(tcp, cid, vsockPort); err != nil {
+				log.Printf("[host] inbound bridge error: %v", err)
 			}
 		}()
 	}
+}
+
+// hostOutboundBridge listens on a VSOCK port for connections from the enclave
+// and bridges them to the endpoint's TCP host:443. This replaces AWS vsock-proxy.
+func hostOutboundBridge(ep Endpoint) {
+	ln, err := vsock.Listen(ep.VsockPort, nil)
+	if err != nil {
+		log.Fatalf("[host] failed to listen on VSOCK:%d for %s: %v", ep.VsockPort, ep.Host, err)
+	}
+
+	target := fmt.Sprintf("%s:443", ep.Host)
+	log.Printf("[host] outbound VSOCK:%d → TCP:%s", ep.VsockPort, target)
+
+	for {
+		vc, err := ln.Accept()
+		if err != nil {
+			log.Printf("[host] outbound accept error (VSOCK:%d): %v", ep.VsockPort, err)
+			continue
+		}
+		go func() {
+			if err := bridgeToTCPHost(vc, target); err != nil {
+				log.Printf("[host] outbound bridge error (%s): %v", target, err)
+			}
+		}()
+	}
+}
+
+// bridgeToTCPHost bridges a connection to a remote TCP host (DNS resolved at dial time).
+func bridgeToTCPHost(src net.Conn, target string) error {
+	defer src.Close()
+
+	tcp, err := net.Dial("tcp", target)
+	if err != nil {
+		return fmt.Errorf("TCP dial %s: %w", target, err)
+	}
+	defer tcp.Close()
+
+	return copyBidirectional(src, tcp)
 }
 
 func bridgeToVSOCK(src net.Conn, cid, port uint32) error {
@@ -280,16 +382,7 @@ func configSend() {
 		log.Fatalf("failed to read stdin: %v", err)
 	}
 
-	conn, err := vsock.Dial(uint32(cid), uint32(port), nil)
-	if err != nil {
-		log.Fatalf("VSOCK dial %d:%d: %v", cid, port, err)
-	}
-
-	if _, err := conn.Write(data); err != nil {
-		conn.Close()
-		log.Fatalf("VSOCK write: %v", err)
-	}
-	conn.Close()
+	sendConfigVSOCK(uint32(cid), uint32(port), data)
 }
 
 func configRecv() {

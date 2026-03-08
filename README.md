@@ -24,10 +24,11 @@ Write your enclave business logic in TypeScript using Mysten's SDKs (`@mysten/su
 └───────────────────── VSOCK boundary ──────────────────┘
          ↕                              ↕
 ┌──────── EC2 Host ─────────────────────────────────────┐
-│  argonaut host TCP:8080 ↔ VSOCK:3000 (inbound)       │
-│  vsock-proxy VSOCK:8101 ↔ seal.mirai.cloud:443       │
-│  vsock-proxy VSOCK:8103 ↔ walrus.space:443           │
-│  vsock-proxy VSOCK:8104 ↔ fullnode.sui.io:443        │
+│  argonaut host (single process, all bridges):         │
+│    TCP:8080 ↔ VSOCK:3000 (inbound HTTP)               │
+│    VSOCK:8101 ↔ seal.mirai.cloud:443 (outbound)       │
+│    VSOCK:8103 ↔ walrus.space:443 (outbound)            │
+│    VSOCK:8104 ↔ fullnode.sui.io:443 (outbound)         │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -35,7 +36,7 @@ Write your enclave business logic in TypeScript using Mysten's SDKs (`@mysten/su
 
 **Bun compiled binary** (`nautilus-server`): Your TypeScript application compiled into a single ~55MB standalone binary via `bun build --compile`. Contains the Bun runtime, all npm dependencies, and your business logic. Runs as PID 1 target inside the enclave.
 
-**Go companion binary** (`argonaut`): A single static binary that handles all native enclave concerns — TCP↔VSOCK bridging, NSM attestation via `/dev/nsm` ioctl, and boot config delivery. Named "arGOnaut" as a nod to Go and its Nautilus-adjacent role. In enclave mode it is spawned as a child process by the Bun binary at boot; in host mode the same binary bridges inbound TCP into enclave VSOCK. It manages:
+**Go companion binary** (`argonaut`): A single static binary that handles all native enclave concerns — TCP↔VSOCK bridging, NSM attestation via `/dev/nsm` ioctl, and boot config delivery. Named "arGOnaut" as a nod to Go and its Nautilus-adjacent role. The same binary runs on both sides: `argonaut host` on the EC2 instance (config delivery + all traffic bridges in one process), `argonaut enclave` inside the enclave (spawned by Bun at boot). It manages:
 
 - **Inbound bridge**: VSOCK:3000 → TCP:127.0.0.1:3000 (HTTP requests from the host reach your Bun server)
 - **Outbound proxies**: TCP:127.0.0.x:443 → VSOCK:parent:port (your `fetch()` calls reach external services)
@@ -205,7 +206,7 @@ PCR0 measures the enclave image (your code + all dependencies). PCR1 measures th
 
 ### Can I add more external endpoints?
 
-Yes. Add entries to the `endpoints` array in your boot config and set up corresponding `vsock-proxy` instances on the host. Each endpoint gets a unique loopback IP (`127.0.0.64`, `127.0.0.65`, etc.) and an entry in `/etc/hosts`. Your code just calls `fetch("https://your-service.com/...")` as usual.
+Yes. Add entries to the `endpoints` array in your config file. `argonaut host` automatically sets up outbound VSOCK→TCP bridges for each endpoint, and `argonaut enclave` creates the corresponding loopback IPs (`127.0.0.64`, `127.0.0.65`, etc.) and `/etc/hosts` entries. Your code just calls `fetch("https://your-service.com/...")` as usual. Only hosts listed in the config are reachable — there is no general internet access from inside the enclave.
 
 ### Why Bun instead of Node.js?
 
@@ -227,11 +228,11 @@ Yes. The framework provides generic enclave utilities (attestation, signing, has
 
 Include a `secrets` object in the boot config sent via VSOCK:7777. These are available to route handlers via `ctx.config.secrets`. They are not injected into `process.env`. Note that the boot config is sent by the host, so secrets are only as secure as your trust model. For highly sensitive material, consider using Seal encryption with the enclave's attestation-bound identity.
 
-### Why not use socat for the host-side bridge?
+### Why not use socat or vsock-proxy?
 
-[Mysten's official Nautilus](https://github.com/MystenLabs/nautilus/blob/main/expose_enclave.sh) and most Nitro Enclave tutorials use `socat TCP-LISTEN:port,fork VSOCK-CONNECT:cid:port` on the parent EC2 to bridge inbound HTTP traffic. socat's `fork` mode creates a new process and VSOCK connection for every incoming TCP connection, and under rapid sequential connections the VSOCK socket can race, causing `Transport endpoint is not connected` errors.
+[Mysten's official Nautilus](https://github.com/MystenLabs/nautilus/blob/main/expose_enclave.sh) and most Nitro Enclave tutorials use `socat` for inbound bridging and AWS's [`vsock-proxy`](https://github.com/aws/aws-nitro-enclaves-cli/tree/main/vsock_proxy) for outbound. This means running N+1 separate processes on the host (one socat for inbound + one vsock-proxy per external endpoint).
 
-We ship a dedicated host mode in argonaut (`argonaut host`) that replaces socat for inbound traffic. The Linux VSOCK subsystem itself can transiently timeout under rapid sequential connections regardless of the client — socat surfaces these as client-visible errors, while `argonaut host` absorbs them with a transparent connect retry loop. Usage: `argonaut host <listen-port> <enclave-cid> <vsock-port>`.
+`argonaut host <cid> <config-file>` replaces all of them with a single process. It reads the config, sends it to the enclave, then runs both inbound (TCP→VSOCK) and outbound (VSOCK→TCP) bridges concurrently. Fewer processes to manage, one config file, and proper bidirectional stream handling with half-close support.
 
 ### Is the native traffic proxy necessary? Can I use Python's traffic_forwarder.py?
 
@@ -251,11 +252,11 @@ Yes. `bun run dev` starts the server in dev mode — no enclave, no VSOCK, no NS
 
 ## Testing
 
-151 tests across TypeScript and Go cover every security boundary and functional path. Run all tests with:
+158 tests across TypeScript and Go cover every security boundary and functional path. Run all tests with:
 
 ```bash
-bun test                    # TypeScript (112 tests)
-go test -v ./... -C argonaut  # Go (39 tests: 9 traffic + 30 NSM)
+bun test                    # TypeScript (109 tests)
+go test -v ./... -C argonaut  # Go (49 tests: 19 traffic + 30 NSM)
 ```
 
 ### TypeScript — Config Validation (`tests/config.test.ts`)
@@ -320,7 +321,7 @@ go test -v ./... -C argonaut  # Go (39 tests: 9 traffic + 30 NSM)
 
 ### Go — Traffic Proxy (`argonaut/main_test.go`)
 
-- **Config JSON parsing** — Parses valid JSON with endpoints, httpVsockPort, and httpTcpPort.
+- **Enclave config JSON parsing** — Parses valid JSON with endpoints, httpVsockPort, and httpTcpPort.
 - **Empty endpoints** — Handles configs with zero endpoints.
 - **Missing fields** — Missing JSON fields default to zero values.
 - **Invalid JSON** — Rejects malformed JSON input.
@@ -329,6 +330,13 @@ go test -v ./... -C argonaut  # Go (39 tests: 9 traffic + 30 NSM)
 - **Hosts file injection prevention** — Each line has exactly two fields (IP and hostname), no extra content.
 - **Bidirectional copy** — Data flows correctly in both directions through the bridge with proper half-close handling.
 - **Max endpoint limit** — Verifies the IP address space boundary at 191 endpoints.
+- **Host config parsing** — Parses httpPort, httpVsockPort, and endpoints; ignores enclave-only fields (secrets, app, logLevel).
+- **Host config multiple endpoints** — Parses configs with 3 endpoint entries.
+- **Host config missing httpPort** — Detects zero/missing httpPort for validation.
+- **DNS resolution** (ported from [aws-nitro-enclaves-cli](https://github.com/aws/aws-nitro-enclaves-cli/blob/main/vsock_proxy/src/dns.rs)) — Resolves localhost, rejects invalid domains, verifies IPv4 results, hostname-based dial.
+- **Outbound bridge** (ported from [aws-nitro-enclaves-cli](https://github.com/aws/aws-nitro-enclaves-cli/blob/main/vsock_proxy/src/proxy.rs)) — Bidirectional data flow through bridgeToTCPHost with echo server.
+- **Large data transfer** — 1MB of random data transfers correctly through the bridge (verifies io.Copy handles data larger than internal buffer).
+- **Concurrent outbound connections** — 10 simultaneous connections through the bridge all resolve correctly without interference.
 
 ### Go — NSM (`argonaut/nsm_test.go`)
 
