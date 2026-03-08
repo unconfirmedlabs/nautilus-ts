@@ -1,4 +1,4 @@
-module github.com/unconfirmedlabs/nautilus-ts/forwarder
+module github.com/unconfirmedlabs/nautilus-ts/tools/traffic-proxy
 
 go 1.23.0
 

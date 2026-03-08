@@ -1,6 +1,6 @@
 /**
- * Mock nsm-helper that implements the same line-based protocol
- * as the real Rust binary, for testing NsmHelperClient.
+ * Mock nsm-proxy that implements the same line-based protocol
+ * as the real Rust binary, for testing NsmProxyClient.
  *
  * Protocol:
  *   "<id> ATT <hex-public-key>" → "<id> OK <hex-public-key>" (echoes back)

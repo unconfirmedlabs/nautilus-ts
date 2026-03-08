@@ -81,34 +81,31 @@ export function validateBootConfig(raw: unknown): BootConfig {
 
 /**
  * Receive boot config from the host via VSOCK port 7777.
- * Blocks until the host sends the JSON blob and closes the connection.
+ * Spawns `traffic-proxy config recv 7777` which listens on VSOCK,
+ * accepts one connection, and writes the received data to stdout.
  */
 export async function receiveBootConfig(): Promise<BootConfig> {
-  // Dynamic import to avoid loading VSOCK module outside enclave
-  const { vsockListen, vsockAccept, vsockReadAll, vsockClose } = await import("./vsock.ts");
-
   console.log("[config] waiting for boot config on VSOCK:7777...");
-  const listenFd = vsockListen(7777);
-  let clientFd: number | undefined;
-  try {
-    clientFd = vsockAccept(listenFd);
-    const data = vsockReadAll(clientFd);
-    var json = data.toString("utf-8");
-  } finally {
-    if (clientFd !== undefined) vsockClose(clientFd);
-    vsockClose(listenFd);
+
+  const proc = Bun.spawn(["/traffic-proxy", "config", "recv", "7777"], {
+    stdout: "pipe",
+    stderr: "inherit",
+  });
+
+  const code = await proc.exited;
+  if (code !== 0) {
+    throw new Error(`traffic-proxy config recv exited with code ${code}`);
   }
 
+  const json = await new Response(proc.stdout).text();
   console.log(`[config] received ${json.length} bytes`);
 
   const config = validateBootConfig(JSON.parse(json));
 
   // Secrets are available to handlers via ctx.config.secrets —
   // we intentionally do NOT inject them into process.env to prevent
-  // the host from overwriting internal env vars (e.g. NSM_HELPER_PATH,
-  // which is read when resolving the NSM helper binary).
-  // NOTE: this is a breaking change for apps that read boot secrets
-  // from process.env — use ctx.config.secrets instead.
+  // the host from overwriting internal env vars (e.g. NSM_PROXY_PATH,
+  // which is read when resolving the NSM proxy binary).
   if (config.secrets) {
     console.log(`[config] ${Object.keys(config.secrets).length} secrets available via ctx.config.secrets`);
   }

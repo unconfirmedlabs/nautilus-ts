@@ -3,15 +3,15 @@
  *
  * We can't test actual NSM attestation (requires /dev/nsm in a Nitro Enclave),
  * but we can test the detection logic, graceful fallback behavior, and the
- * NsmHelperClient protocol over a mock helper subprocess.
+ * NsmProxyClient protocol over a mock proxy subprocess.
  */
 
 import { describe, test, expect, afterEach } from "bun:test";
-import { isEnclave, getAttestation, getHardwareRandom, NsmHelperClient } from "../src/nsm/index.ts";
+import { isEnclave, getAttestation, getHardwareRandom, NsmProxyClient } from "../src/nsm/index.ts";
 import { toHex, fromHex } from "../src/core/crypto.ts";
 import { resolve } from "path";
 
-const MOCK_HELPER = resolve(import.meta.dir, "fixtures/mock-nsm-helper.ts");
+const MOCK_PROXY = resolve(import.meta.dir, "fixtures/mock-nsm-proxy.ts");
 
 describe("isEnclave", () => {
   test("returns false outside enclave", () => {
@@ -38,15 +38,15 @@ describe("getHardwareRandom", () => {
   });
 });
 
-describe("NsmHelperClient", () => {
-  let client: NsmHelperClient;
+describe("NsmProxyClient", () => {
+  let client: NsmProxyClient;
 
   afterEach(() => {
     client?.stop();
   });
 
-  test("getAttestation round-trips public key through helper", async () => {
-    client = new NsmHelperClient("bun", [MOCK_HELPER]);
+  test("getAttestation round-trips public key through proxy", async () => {
+    client = new NsmProxyClient("bun", [MOCK_PROXY]);
     const publicKey = new Uint8Array(32);
     crypto.getRandomValues(publicKey);
 
@@ -55,15 +55,15 @@ describe("NsmHelperClient", () => {
     expect(toHex(result)).toBe(toHex(publicKey));
   });
 
-  test("getRandom returns bytes from helper", async () => {
-    client = new NsmHelperClient("bun", [MOCK_HELPER]);
+  test("getRandom returns bytes from proxy", async () => {
+    client = new NsmProxyClient("bun", [MOCK_PROXY]);
     const result = await client.getRandom();
 
     expect(toHex(result)).toBe("deadbeefcafebabe0123456789abcdef");
   });
 
   test("multiplexed concurrent requests resolve correctly", async () => {
-    client = new NsmHelperClient("bun", [MOCK_HELPER]);
+    client = new NsmProxyClient("bun", [MOCK_PROXY]);
 
     const keys = Array.from({ length: 10 }, () => {
       const k = new Uint8Array(32);
@@ -86,9 +86,9 @@ describe("NsmHelperClient", () => {
     }
   });
 
-  test("rejects pending requests when helper exits", async () => {
-    // Use a helper that reads stdin but never responds, so the request stays pending
-    client = new NsmHelperClient("bun", ["-e", "await Bun.sleep(999999)"]);
+  test("rejects pending requests when proxy exits", async () => {
+    // Use a proxy that reads stdin but never responds, so the request stays pending
+    client = new NsmProxyClient("bun", ["-e", "await Bun.sleep(999999)"]);
 
     const promise = client.getAttestation(new Uint8Array(32));
     await Bun.sleep(10);
@@ -97,8 +97,8 @@ describe("NsmHelperClient", () => {
     expect(promise).rejects.toThrow();
   });
 
-  test("rejects requests after helper has exited", async () => {
-    client = new NsmHelperClient("bun", [MOCK_HELPER]);
+  test("rejects requests after proxy has exited", async () => {
+    client = new NsmProxyClient("bun", [MOCK_PROXY]);
     client.stop();
     // Small delay for the exit handler to fire
     await Bun.sleep(10);

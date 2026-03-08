@@ -1,17 +1,25 @@
-// Unified VSOCK↔TCP forwarder for Nautilus.
+// Unified VSOCK↔TCP traffic proxy for Nautilus.
 //
-// Two modes:
+// Modes:
 //
-//	forwarder host <tcp-port> <cid> <vsock-port>
+//	traffic-proxy host <tcp-port> <cid> <vsock-port>
 //	    Listen on TCP, forward to VSOCK. Used on the parent EC2 instance
 //	    to bridge inbound HTTP into the enclave.
 //
-//	forwarder enclave
+//	traffic-proxy enclave
 //	    Read JSON config from stdin, then:
 //	    1. Write /etc/hosts for endpoint hostname resolution
 //	    2. Inbound:  VSOCK listen → TCP connect to localhost (HTTP to Bun)
 //	    3. Outbound: TCP listen on loopback → VSOCK connect to parent
 //	    Runs inside the Nitro Enclave where there is no network.
+//
+//	traffic-proxy config send <cid> <vsock-port>
+//	    Read stdin and send it to VSOCK:<cid>:<port>. Used on the host
+//	    to deliver boot config to the enclave.
+//
+//	traffic-proxy config recv <vsock-port>
+//	    Listen on VSOCK:<port>, accept one connection, read all data,
+//	    and write it to stdout. Used inside the enclave at boot.
 package main
 
 import (
@@ -40,6 +48,8 @@ func main() {
 		hostMode()
 	case "enclave":
 		enclaveMode()
+	case "config":
+		configMode()
 	default:
 		usage()
 	}
@@ -49,6 +59,8 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  %s host <tcp-port> <cid> <vsock-port>\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s enclave  (reads JSON config from stdin)\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s config send <cid> <vsock-port>  (send stdin to VSOCK)\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s config recv <vsock-port>        (receive from VSOCK to stdout)\n", os.Args[0])
 	os.Exit(1)
 }
 
@@ -148,7 +160,7 @@ func enclaveMode() {
 		wg.Add(1)
 		go func(localIP string, vsockPort uint32) {
 			defer wg.Done()
-			outboundForwarder(localIP, vsockPort)
+			outboundProxy(localIP, vsockPort)
 		}(ip, ep.VsockPort)
 	}
 
@@ -202,7 +214,7 @@ func bridgeToTCP(src net.Conn, tcpPort uint16) error {
 	return copyBidirectional(src, tcp)
 }
 
-func outboundForwarder(localIP string, vsockPort uint32) {
+func outboundProxy(localIP string, vsockPort uint32) {
 	addr := fmt.Sprintf("%s:443", localIP)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -221,6 +233,82 @@ func outboundForwarder(localIP string, vsockPort uint32) {
 			}
 		}()
 	}
+}
+
+// --- Config mode: one-shot VSOCK send/recv ---
+
+func configMode() {
+	if len(os.Args) < 4 {
+		usage()
+	}
+
+	switch os.Args[2] {
+	case "send":
+		configSend()
+	case "recv":
+		configRecv()
+	default:
+		usage()
+	}
+}
+
+func configSend() {
+	if len(os.Args) != 5 {
+		usage()
+	}
+
+	cid, err := strconv.ParseUint(os.Args[3], 10, 32)
+	if err != nil {
+		log.Fatalf("invalid CID: %s", os.Args[3])
+	}
+	port, err := strconv.ParseUint(os.Args[4], 10, 32)
+	if err != nil {
+		log.Fatalf("invalid VSOCK port: %s", os.Args[4])
+	}
+
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		log.Fatalf("failed to read stdin: %v", err)
+	}
+
+	conn, err := vsock.Dial(uint32(cid), uint32(port), nil)
+	if err != nil {
+		log.Fatalf("VSOCK dial %d:%d: %v", cid, port, err)
+	}
+
+	if _, err := conn.Write(data); err != nil {
+		conn.Close()
+		log.Fatalf("VSOCK write: %v", err)
+	}
+	conn.Close()
+}
+
+func configRecv() {
+	if len(os.Args) != 4 {
+		usage()
+	}
+
+	port, err := strconv.ParseUint(os.Args[3], 10, 32)
+	if err != nil {
+		log.Fatalf("invalid VSOCK port: %s", os.Args[3])
+	}
+
+	ln, err := vsock.Listen(uint32(port), nil)
+	if err != nil {
+		log.Fatalf("VSOCK listen :%d: %v", port, err)
+	}
+
+	conn, err := ln.Accept()
+	if err != nil {
+		log.Fatalf("VSOCK accept: %v", err)
+	}
+	ln.Close()
+
+	if _, err := io.Copy(os.Stdout, conn); err != nil {
+		conn.Close()
+		log.Fatalf("VSOCK read: %v", err)
+	}
+	conn.Close()
 }
 
 // --- Shared bidirectional copy with proper half-close ---

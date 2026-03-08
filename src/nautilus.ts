@@ -31,7 +31,7 @@ import {
   blake2b256,
   sha256Hash,
 } from "./core/index.ts";
-import { isEnclave, getAttestation, getHardwareRandom, stopNsmHelper } from "./nsm/index.ts";
+import { isEnclave, getAttestation, getHardwareRandom, stopNsmProxy } from "./nsm/index.ts";
 
 export interface NautilusContext {
   /** Hex-encoded public key. */
@@ -83,7 +83,7 @@ export class Nautilus {
   stop(): void {
     this.server?.stop(true);
     this.server = undefined;
-    stopNsmHelper();
+    stopNsmProxy();
   }
 
   /**
@@ -122,26 +122,26 @@ export class Nautilus {
     return this;
   }
 
-  /** Spawn the traffic forwarder as a child process. */
-  private startTrafficForwarder(config: BootConfig, httpPort: number): void {
-    const forwarderConfig = JSON.stringify({
+  /** Spawn the traffic proxy as a child process. */
+  private startTrafficProxy(config: BootConfig, httpPort: number): void {
+    const proxyConfig = JSON.stringify({
       http_vsock_port: httpPort,
       http_tcp_port: httpPort,
       endpoints: config.endpoints,
     });
 
-    const proc = Bun.spawn(["/traffic-forwarder", "enclave"], {
-      stdin: new Blob([forwarderConfig]),
+    const proc = Bun.spawn(["/traffic-proxy", "enclave"], {
+      stdin: new Blob([proxyConfig]),
       stdout: "inherit",
       stderr: "inherit",
     });
 
     proc.exited.then((code) => {
-      console.error(`[nautilus] traffic-forwarder exited with code ${code}`);
+      console.error(`[nautilus] traffic-proxy exited with code ${code}`);
       process.exit(1);
     });
 
-    console.log(`[nautilus] traffic-forwarder started (pid ${proc.pid})`);
+    console.log(`[nautilus] traffic-proxy started (pid ${proc.pid})`);
   }
 
   /**
@@ -150,7 +150,7 @@ export class Nautilus {
    * In enclave mode:
    *   1. Set up loopback networking
    *   2. Receive config from host via VSOCK:7777
-   *   3. Spawn traffic forwarder (handles /etc/hosts, TCP↔VSOCK bridges)
+   *   3. Spawn traffic proxy (handles /etc/hosts, TCP↔VSOCK bridges)
    *   4. Start HTTP server on TCP:3000
    *
    * In dev mode:
@@ -166,8 +166,8 @@ export class Nautilus {
       setupLoopback();
       config = await receiveBootConfig();
 
-      // Spawn traffic forwarder — handles /etc/hosts, inbound + outbound bridges
-      this.startTrafficForwarder(config, this.port);
+      // Spawn traffic proxy — handles /etc/hosts, inbound + outbound bridges
+      this.startTrafficProxy(config, this.port);
     } else {
       console.log("[nautilus] booting in dev mode");
       config = await devBootConfig(this.configPath);

@@ -2,7 +2,7 @@
  * Enclave networking setup.
  *
  * Loopback interface setup only — all TCP↔VSOCK bridging and /etc/hosts
- * are handled by the traffic-forwarder binary.
+ * are handled by the traffic-proxy binary.
  */
 
 /**

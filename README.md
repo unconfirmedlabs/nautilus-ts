@@ -10,7 +10,7 @@ Write your enclave business logic in TypeScript using Mysten's SDKs (`@mysten/su
 ┌──────────────────── Nitro Enclave ────────────────────┐
 │                                                        │
 │  ┌──────────────┐     ┌──────────────────────────┐    │
-│  │ forwarder    │     │ nautilus-server           │    │
+│  │ traffic-proxy│     │ nautilus-server           │    │
 │  │ (Go)         │     │ (Bun compiled binary)     │    │
 │  │              │     │  Your TS business logic   │    │
 │  │ VSOCK:3000 ──┼─TCP─┤► Bun.serve() on :3000    │    │
@@ -18,13 +18,13 @@ Write your enclave business logic in TypeScript using Mysten's SDKs (`@mysten/su
 │  │ TCP:443 ◄────┼─────┤► fetch("https://...")     │    │
 │  │  ↕ VSOCK     │     │                           │    │
 │  └──────────────┘     │  NSM via persistent       │    │
-│                       │  Rust nsm-helper process  │    │
+│                       │  Rust nsm-proxy process   │    │
 │                       └──────────────────────────┘    │
 │                                                        │
 └───────────────────── VSOCK boundary ──────────────────┘
          ↕                              ↕
 ┌──────── EC2 Host ─────────────────────────────────────┐
-│  forwarder host TCP:8080 ↔ VSOCK:3000 (inbound HTTP) │
+│  traffic-proxy host TCP:8080 ↔ VSOCK:3000 (inbound)  │
 │  vsock-proxy VSOCK:8101 ↔ seal.mirai.cloud:443       │
 │  vsock-proxy VSOCK:8103 ↔ walrus.space:443           │
 │  vsock-proxy VSOCK:8104 ↔ fullnode.sui.io:443        │
@@ -35,13 +35,13 @@ Write your enclave business logic in TypeScript using Mysten's SDKs (`@mysten/su
 
 **Bun compiled binary** (`nautilus-server`): Your TypeScript application compiled into a single ~55MB standalone binary via `bun build --compile`. Contains the Bun runtime, all npm dependencies, and your business logic. Runs as PID 1 target inside the enclave.
 
-**Go traffic forwarder** (`forwarder` / `traffic-forwarder`): A small static binary that handles all TCP↔VSOCK bridging. In enclave mode it is spawned as a child process by the Bun binary at boot; in host mode the same binary bridges inbound TCP into enclave VSOCK. It manages:
+**Go traffic proxy** (`tools/traffic-proxy`): A small static binary that handles all TCP↔VSOCK bridging. In enclave mode it is spawned as a child process by the Bun binary at boot; in host mode the same binary bridges inbound TCP into enclave VSOCK. It manages:
 
 - **Inbound bridge**: VSOCK:3000 → TCP:127.0.0.1:3000 (HTTP requests from the host reach your Bun server)
-- **Outbound forwarders**: TCP:127.0.0.x:443 → VSOCK:parent:port (your `fetch()` calls reach external services)
+- **Outbound proxies**: TCP:127.0.0.x:443 → VSOCK:parent:port (your `fetch()` calls reach external services)
 - **/etc/hosts**: Maps endpoint hostnames to loopback addresses so `fetch("https://fullnode.testnet.sui.io")` resolves correctly
 
-**Rust NSM helper** (`nsm-helper`): A tiny companion process that owns `/dev/nsm` access and exposes attestation and hardware RNG over a line-based stdin/stdout protocol. TypeScript keeps one persistent helper process for the enclave lifetime, avoiding raw native pointer ownership in the Bun runtime.
+**Rust NSM proxy** (`nsm-proxy`): A tiny companion process that owns `/dev/nsm` access and exposes attestation and hardware RNG over a line-based stdin/stdout protocol. TypeScript keeps one persistent proxy process for the enclave lifetime, avoiding raw native pointer ownership in the Bun runtime.
 
 ## Why TypeScript Instead of Pure Rust?
 
@@ -51,10 +51,10 @@ The [official Mysten Nautilus implementation](https://github.com/MystenLabs/naut
 
 **Selective native code**: Native code is used only where it's genuinely better:
 
-- **NSM attestation** requires ioctl on `/dev/nsm` — a tiny Rust helper process keeps that boundary outside the Bun runtime
-- **Traffic forwarding** requires socket bridging across TCP and VSOCK — a small Go binary handles both host and enclave forwarding paths
+- **NSM attestation** requires ioctl on `/dev/nsm` — a tiny Rust proxy process keeps that boundary outside the Bun runtime
+- **Traffic proxying** requires socket bridging across TCP and VSOCK — a small Go binary handles both host and enclave proxying paths
 
-## Why a Custom Traffic Forwarder?
+## Why a Custom Traffic Proxy?
 
 AWS's Nitro Enclave documentation and Mysten's official implementation both use [traffic_forwarder.py](https://github.com/MystenLabs/nautilus/blob/main/src/nautilus-server/traffic_forwarder.py), a Python script that:
 
@@ -64,9 +64,9 @@ AWS's Nitro Enclave documentation and Mysten's official implementation both use 
 
 We replaced it with a small native binary for several reasons:
 
-**No Python in the enclave**: Adding Python to a minimal enclave image adds ~40MB, increases the attack surface, and makes reproducible builds harder. Our traffic forwarder is a single static musl binary (~2MB).
+**No Python in the enclave**: Adding Python to a minimal enclave image adds ~40MB, increases the attack surface, and makes reproducible builds harder. Our traffic proxy is a single static musl binary (~2MB).
 
-**Proper stream handling**: Python threads with blocking `recv()` work but are not optimal. Our forwarder uses full-duplex stream copying with proper half-close handling so larger responses and sequential requests do not wedge the bridge.
+**Proper stream handling**: Python threads with blocking `recv()` work but are not optimal. Our proxy uses full-duplex stream copying with proper half-close handling so larger responses and sequential requests do not wedge the bridge.
 
 **Single process model**: The Python forwarder runs as a separate script with its own lifecycle. Ours is spawned by the Bun process and monitored — if it crashes, the enclave shuts down cleanly instead of silently losing network connectivity.
 
@@ -76,13 +76,11 @@ We replaced it with a small native binary for several reasons:
 
 Nitro Enclaves have no network interface. The only communication channel is [VSOCK](https://man7.org/linux/man-pages/man7/vsock.7.html) — a socket address family (`AF_VSOCK = 40`) for hypervisor-guest communication.
 
-**Boot config** (one-shot): At startup, the Bun binary uses `bun:ffi` to call libc's `socket()`, `bind()`, `listen()`, `accept()`, and `read()` with `AF_VSOCK` to receive a JSON configuration blob from the host via VSOCK port 7777. This is a simple blocking operation that happens once.
+**Boot config** (one-shot): At startup, the Bun binary spawns `traffic-proxy config recv 7777`, which listens on VSOCK port 7777 for a one-shot JSON configuration blob from the host. No FFI or raw socket code in TypeScript — the Go binary handles the VSOCK layer.
 
-**Traffic forwarding** (persistent): All ongoing VSOCK I/O is handled by the Go forwarder. The Bun process only deals with standard TCP sockets — `Bun.serve()` listens on `127.0.0.1:3000`, and `fetch()` calls resolve to loopback addresses that the forwarder bridges to VSOCK.
+**Traffic proxying** (persistent): All ongoing VSOCK I/O is handled by the Go traffic proxy. The Bun process only deals with standard TCP sockets — `Bun.serve()` listens on `127.0.0.1:3000`, and `fetch()` calls resolve to loopback addresses that the proxy bridges to VSOCK.
 
-**NSM attestation**: The `/dev/nsm` device requires an ioctl interface. A minimal Rust helper binary (`nsm-helper`) wraps the [aws-nitro-enclaves-nsm-api](https://github.com/aws/aws-nitro-enclaves-nsm-api) crate and stays alive for the enclave lifetime. TypeScript sends requests over stdin/stdout and receives attestation documents or hardware RNG bytes back as plain hex payloads.
-
-**libc compatibility**: The enclave uses musl libc (via StageX), while development machines use glibc. The VSOCK FFI layer handles this by trying `libc.so.6` first (glibc) and falling back to `libc.so` (musl).
+**NSM attestation**: The `/dev/nsm` device requires an ioctl interface. A minimal Rust proxy binary (`nsm-proxy`) wraps the [aws-nitro-enclaves-nsm-api](https://github.com/aws/aws-nitro-enclaves-nsm-api) crate and stays alive for the enclave lifetime. TypeScript sends requests over stdin/stdout and receives attestation documents or hardware RNG bytes back as plain hex payloads.
 
 ## Quick Start
 
@@ -108,15 +106,14 @@ src/
   server.ts          # Your application entry point
   nautilus.ts        # Framework: boot, routing, HTTP server
   core/
-    vsock.ts         # Minimal VSOCK FFI (config reception only)
-    config.ts        # Boot config via VSOCK:7777
+    config.ts        # Boot config via traffic-proxy VSOCK:7777
     network.ts       # Loopback interface setup
     crypto.ts        # Ed25519 signing, hashing (@noble libraries)
   nsm/
-    index.ts         # Persistent client for the Rust nsm-helper process
-enclave/
-  nsm-helper/        # Rust helper for /dev/nsm attestation and RNG
-forwarder/           # Go binary for host/enclave TCP↔VSOCK bridging
+    index.ts         # Persistent client for the Rust nsm-proxy process
+tools/
+  nsm-proxy/         # Rust proxy for /dev/nsm attestation and RNG
+  traffic-proxy/     # Go binary for host/enclave TCP↔VSOCK bridging
 scripts/
   deploy.sh          # EC2 deployment script
   systemd/           # systemd units for host services
@@ -183,11 +180,11 @@ The `ctx` object provides:
 
 ### How does the enclave access the NSM for attestation?
 
-The NSM (Nitro Secure Module) is accessed via ioctl on `/dev/nsm`. Since JavaScript can't do ioctl directly, we ship a tiny Rust helper process (`nsm-helper`) that wraps the `aws-nitro-enclaves-nsm-api` crate. The Bun process keeps that helper alive and sends it attestation/RNG requests over stdin/stdout, so no raw native pointers cross into the JS runtime.
+The NSM (Nitro Secure Module) is accessed via ioctl on `/dev/nsm`. Since JavaScript can't do ioctl directly, we ship a tiny Rust proxy process (`nsm-proxy`) that wraps the `aws-nitro-enclaves-nsm-api` crate. The Bun process keeps that proxy alive and sends it attestation/RNG requests over stdin/stdout, so no raw native pointers cross into the JS runtime.
 
 ### Does the TypeScript code know it's inside an enclave?
 
-Mostly no, by design. Your `fetch("https://fullnode.testnet.sui.io/...")` calls resolve normally — `/etc/hosts` maps hostnames to loopback addresses, and the forwarder bridges those to VSOCK transparently. The only enclave-aware code is the boot sequence and the `ctx.attest()` call. Your business logic reads like a normal TypeScript server.
+Mostly no, by design. Your `fetch("https://fullnode.testnet.sui.io/...")` calls resolve normally — `/etc/hosts` maps hostnames to loopback addresses, and the traffic proxy bridges those to VSOCK transparently. The only enclave-aware code is the boot sequence and the `ctx.attest()` call. Your business logic reads like a normal TypeScript server.
 
 ### Should I assume the EC2 host is malicious?
 
@@ -219,15 +216,15 @@ Yes. Add entries to the `endpoints` array in your boot config and set up corresp
 
 ### Why Bun instead of Node.js?
 
-Bun compiles TypeScript into a single standalone binary via `bun build --compile`. This binary includes the runtime, all npm dependencies, and your code — no `node_modules` directory, no package manager, no interpreter needed inside the enclave. We still use `bun:ffi` for the one-shot libc VSOCK boot path, but the NSM boundary is handled by a separate Rust helper process rather than direct native FFI in the Bun runtime.
+Bun compiles TypeScript into a single standalone binary via `bun build --compile`. This binary includes the runtime, all npm dependencies, and your code — no `node_modules` directory, no package manager, no interpreter needed inside the enclave. There is no `bun:ffi` usage — all native boundaries (VSOCK, NSM) are handled by companion binaries (`traffic-proxy`, `nsm-proxy`) that the Bun process spawns and communicates with over stdin/stdout or TCP.
 
 ### Why not just use the official Mysten Nautilus (Rust)?
 
 You can and should if Rust is your preference. This template exists for teams that want to write their enclave business logic in TypeScript using Mysten's TypeScript SDKs. The trade-off is a slightly larger image (Bun runtime + Rust components vs pure Rust) in exchange for faster iteration and access to the TypeScript ecosystem.
 
-### What happens if the traffic forwarder crashes?
+### What happens if the traffic proxy crashes?
 
-The Bun process monitors the traffic forwarder as a child process. If it exits, Bun logs the error and calls `process.exit(1)`, which terminates the enclave. This is intentional — silently losing network connectivity is worse than a clean restart.
+The Bun process monitors the traffic proxy as a child process. If it exits, Bun logs the error and calls `process.exit(1)`, which terminates the enclave. This is intentional — silently losing network connectivity is worse than a clean restart.
 
 ### Can I use this without Sui?
 
@@ -241,11 +238,11 @@ Include a `secrets` object in the boot config sent via VSOCK:7777. These are ava
 
 [Mysten's official Nautilus](https://github.com/MystenLabs/nautilus/blob/main/expose_enclave.sh) and most Nitro Enclave tutorials use `socat TCP-LISTEN:port,fork VSOCK-CONNECT:cid:port` on the parent EC2 to bridge inbound HTTP traffic. socat's `fork` mode creates a new process and VSOCK connection for every incoming TCP connection, and under rapid sequential connections the VSOCK socket can race, causing `Transport endpoint is not connected` errors.
 
-We ship a dedicated host mode in the `forwarder` binary (`forwarder/`) that replaces socat for inbound traffic. The Linux VSOCK subsystem itself can transiently timeout under rapid sequential connections regardless of the client — socat surfaces these as client-visible errors, while `forwarder host` absorbs them with a transparent connect retry loop. Usage: `forwarder host <listen-port> <enclave-cid> <vsock-port>`.
+We ship a dedicated host mode in the `traffic-proxy` binary (`tools/traffic-proxy/`) that replaces socat for inbound traffic. The Linux VSOCK subsystem itself can transiently timeout under rapid sequential connections regardless of the client — socat surfaces these as client-visible errors, while `traffic-proxy host` absorbs them with a transparent connect retry loop. Usage: `traffic-proxy host <listen-port> <enclave-cid> <vsock-port>`.
 
-### Is the native traffic forwarder necessary? Can I use Python's traffic_forwarder.py?
+### Is the native traffic proxy necessary? Can I use Python's traffic_forwarder.py?
 
-You can, but we don't recommend it. The Python forwarder adds ~40MB to the image, uses blocking threads, and requires the Python runtime. Our native forwarder is a small static binary with proper bidirectional stream handling. It also means one fewer language runtime in your attack surface.
+You can, but we don't recommend it. The Python forwarder adds ~40MB to the image, uses blocking threads, and requires the Python runtime. Our native traffic proxy is a small static binary with proper bidirectional stream handling. It also means one fewer language runtime in your attack surface.
 
 ### How does this compare to Mysten's Nautilus for reproducibility?
 

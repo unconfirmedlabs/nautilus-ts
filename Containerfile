@@ -2,8 +2,8 @@
 #
 # Architecture:
 #   - Compiled Bun standalone binary (includes all TS/JS deps)
-#   - Go traffic-forwarder binary (TCP↔VSOCK bridging with proper half-close)
-#   - Rust nsm-helper binary for attestation and hardware RNG (/dev/nsm)
+#   - Go traffic-proxy binary (TCP↔VSOCK bridging with proper half-close)
+#   - Rust nsm-proxy binary for attestation and hardware RNG (/dev/nsm)
 #   - No Python, no shell scripts as PID 1
 #   - nit init runs the Bun binary directly
 
@@ -39,7 +39,7 @@ COPY src/ /app/src/
 COPY package.json tsconfig.json /app/
 RUN bun build --compile --minify --bytecode --sourcemap --target=bun-linux-x64-musl ./src/server.ts --outfile nautilus-server
 
-# --- Build Rust NSM helper ---
+# --- Build Rust NSM proxy ---
 FROM scratch AS rust-base
 COPY --from=core-busybox . /
 COPY --from=core-musl . /
@@ -56,17 +56,17 @@ COPY --from=core-binutils . /
 COPY --from=core-ca-certificates . /
 
 FROM rust-base AS rust-build
-COPY enclave/nsm-helper /build/nsm-helper
+COPY tools/nsm-proxy /build/nsm-proxy
 ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
-WORKDIR /build/nsm-helper
+WORKDIR /build/nsm-proxy
 RUN cargo build --release --locked --target "$TARGET"
 
-# --- Build Go forwarder (VSOCK↔TCP bridge) ---
+# --- Build Go traffic proxy (VSOCK↔TCP bridge) ---
 FROM golang:1.23-alpine@sha256:383395b794dffa5b53012a212365d40c8e37109a626ca30d6151c8348d380b5f AS go-build
 WORKDIR /build
-COPY forwarder/ .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o traffic-forwarder .
+COPY tools/traffic-proxy/ .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o traffic-proxy .
 
 # --- Assemble initramfs ---
 FROM scratch AS base
@@ -104,19 +104,19 @@ RUN mkdir -p initramfs/usr/lib && \
     cp /usr/lib/libgcc_s.so.1 initramfs/usr/lib/ && \
     cp /usr/lib/libunwind.so.8 initramfs/usr/lib/
 
-# Rust NSM helper
-COPY --from=rust-build /build/nsm-helper/target/x86_64-unknown-linux-musl/release/nsm-helper initramfs/nsm-helper
-RUN chmod +x initramfs/nsm-helper
+# Rust NSM proxy
+COPY --from=rust-build /build/nsm-proxy/target/x86_64-unknown-linux-musl/release/nsm-proxy initramfs/nsm-proxy
+RUN chmod +x initramfs/nsm-proxy
 
-# Go traffic forwarder (VSOCK↔TCP bridge)
-COPY --from=go-build /build/traffic-forwarder initramfs/traffic-forwarder
-RUN chmod +x initramfs/traffic-forwarder
+# Go traffic proxy (VSOCK↔TCP bridge)
+COPY --from=go-build /build/traffic-proxy initramfs/traffic-proxy
+RUN chmod +x initramfs/traffic-proxy
 
 # Environment
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 SSL_CERT_DIR=/etc/ssl/certs
-NSM_HELPER_PATH=/nsm-helper
+NSM_PROXY_PATH=/nsm-proxy
 LD_LIBRARY_PATH=/usr/lib:/lib
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 EOF

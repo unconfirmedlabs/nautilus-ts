@@ -1,7 +1,7 @@
 /**
- * NSM (Nitro Secure Module) access via a persistent Rust helper process.
+ * NSM (Nitro Secure Module) access via a persistent Rust proxy process.
  *
- * The helper owns all /dev/nsm interaction and speaks a tiny line-based
+ * The proxy owns all /dev/nsm interaction and speaks a tiny line-based
  * protocol over stdin/stdout:
  *   - "<id> ATT <hex-public-key>"
  *   - "<id> RND"
@@ -18,7 +18,7 @@ interface PendingRequest {
   reject(error: Error): void;
 }
 
-export class NsmHelperClient {
+export class NsmProxyClient {
   private proc: Bun.Subprocess<"pipe", "pipe", "inherit">;
   private nextId = 1;
   private pending = new Map<number, PendingRequest>();
@@ -34,8 +34,8 @@ export class NsmHelperClient {
     void this.readResponses();
     this.proc.exited.then((code) => {
       this.exited = true;
-      helperClient = null;
-      const error = new Error(`nsm-helper exited with code ${code}`);
+      proxyClient = null;
+      const error = new Error(`nsm-proxy exited with code ${code}`);
       for (const pending of this.pending.values()) {
         pending.reject(error);
       }
@@ -56,7 +56,7 @@ export class NsmHelperClient {
       this.proc.kill();
     }
     this.exited = true;
-    helperClient = null;
+    proxyClient = null;
   }
 
   private async sendRequest(
@@ -64,7 +64,7 @@ export class NsmHelperClient {
     payload?: Uint8Array,
   ): Promise<string> {
     if (this.exited) {
-      throw new Error("nsm-helper is not running");
+      throw new Error("nsm-proxy is not running");
     }
 
     const id = this.nextId++;
@@ -112,7 +112,7 @@ export class NsmHelperClient {
     const firstSpace = line.indexOf(" ");
     const secondSpace = line.indexOf(" ", firstSpace + 1);
     if (firstSpace === -1 || secondSpace === -1) {
-      console.error(`[nsm] malformed helper response: ${line}`);
+      console.error(`[nsm] malformed proxy response: ${line}`);
       return;
     }
 
@@ -121,7 +121,7 @@ export class NsmHelperClient {
     const payload = line.slice(secondSpace + 1);
     const pending = this.pending.get(id);
     if (!pending) {
-      console.error(`[nsm] orphaned helper response for id=${id}`);
+      console.error(`[nsm] orphaned proxy response for id=${id}`);
       return;
     }
 
@@ -131,18 +131,18 @@ export class NsmHelperClient {
       return;
     }
 
-    pending.reject(new Error(`nsm-helper error: ${payload}`));
+    pending.reject(new Error(`nsm-proxy error: ${payload}`));
   }
 }
 
-let helperClient: NsmHelperClient | null = null;
+let proxyClient: NsmProxyClient | null = null;
 
-function findHelperPath(): string | null {
+function findProxyPath(): string | null {
   const candidates = [
-    process.env.NSM_HELPER_PATH,
-    "/nsm-helper",
-    "./target/x86_64-unknown-linux-musl/release/nsm-helper",
-    "./target/release/nsm-helper",
+    process.env.NSM_PROXY_PATH,
+    "/nsm-proxy",
+    "./target/x86_64-unknown-linux-musl/release/nsm-proxy",
+    "./target/release/nsm-proxy",
   ].filter(Boolean) as string[];
 
   for (const path of candidates) {
@@ -154,16 +154,16 @@ function findHelperPath(): string | null {
   return null;
 }
 
-function getClient(): NsmHelperClient {
-  if (helperClient) return helperClient;
+function getClient(): NsmProxyClient {
+  if (proxyClient) return proxyClient;
 
-  const path = findHelperPath();
+  const path = findProxyPath();
   if (!path) {
-    throw new Error("nsm-helper binary not found");
+    throw new Error("nsm-proxy binary not found");
   }
 
-  helperClient = new NsmHelperClient(path);
-  return helperClient;
+  proxyClient = new NsmProxyClient(path);
+  return proxyClient;
 }
 
 /**
@@ -187,10 +187,10 @@ export async function getHardwareRandom(): Promise<Uint8Array | null> {
   return await getClient().getRandom();
 }
 
-/** Stop the NSM helper if it is running. */
-export function stopNsmHelper(): void {
-  helperClient?.stop();
-  helperClient = null;
+/** Stop the NSM proxy if it is running. */
+export function stopNsmProxy(): void {
+  proxyClient?.stop();
+  proxyClient = null;
 }
 
 /**

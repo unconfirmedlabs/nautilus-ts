@@ -1,5 +1,5 @@
 REGISTRY := local
-SRC_FILES := $(shell find src enclave forwarder -type f 2>/dev/null)
+SRC_FILES := $(shell find src tools -type f 2>/dev/null)
 ENCLAVE_MEMORY ?= 4096
 
 .DEFAULT_GOAL := default

@@ -9,7 +9,11 @@
  *   4. bun.lock exists
  *   5. Bun install uses --frozen-lockfile
  *   6. Warns about floating versions in package.json
- *   7. Lockfiles are not gitignored
+ *   7. Lockfiles not gitignored
+ *   8. Go dependency pinning (go.sum exists)
+ *   9. Go builds are static and deterministic (CGO_ENABLED=0)
+ *  10. Docker build uses --provenance=false (prevents non-deterministic metadata)
+ *  11. Initramfs timestamps are zeroed and cpio uses --reproducible
  *
  * Usage: bun scripts/check-reproducibility.ts
  */
@@ -190,6 +194,89 @@ if (existsSync(gitignorePath)) {
   }
 } else {
   pass("No .gitignore (lockfiles will be committed)");
+}
+console.log();
+
+// --- 8. Go dependency pinning ---
+console.log("8. Go dependency pinning");
+const goModGlob = new Glob("**/go.mod");
+const goMods: string[] = [];
+for await (const path of goModGlob.scan({ cwd: REPO_ROOT, absolute: true })) {
+  if (!path.includes("/vendor/")) goMods.push(path);
+}
+
+if (goMods.length === 0) {
+  pass("No Go modules found (nothing to check)");
+} else {
+  for (const mod of goMods) {
+    const dir = dirname(mod);
+    const modName = basename(dir);
+    if (existsSync(resolve(dir, "go.sum"))) {
+      pass(`${modName}/go.sum exists`);
+    } else {
+      fail(`${modName}/go.sum missing — run 'go mod tidy' in ${dir}`);
+    }
+  }
+}
+console.log();
+
+// --- 9. Go builds are static (CGO_ENABLED=0) ---
+console.log("9. Go static builds");
+if (existsSync(CONTAINERFILE)) {
+  const content = await Bun.file(CONTAINERFILE).text();
+  const goBuilds = content.split("\n").filter(l => /\bgo build\b/.test(l));
+
+  if (goBuilds.length === 0) {
+    pass("No go build commands in Containerfile");
+  } else {
+    let allStatic = true;
+    for (const line of goBuilds) {
+      if (!line.includes("CGO_ENABLED=0")) {
+        fail(`Go build without CGO_ENABLED=0 (not static): ${line.trim()}`);
+        allStatic = false;
+      }
+    }
+    if (allStatic) {
+      pass(`All ${goBuilds.length} go build commands use CGO_ENABLED=0`);
+    }
+  }
+}
+console.log();
+
+// --- 10. Docker --provenance=false ---
+console.log("10. Docker provenance disabled");
+const makefile = resolve(REPO_ROOT, "Makefile");
+if (existsSync(makefile)) {
+  const content = await Bun.file(makefile).text();
+  if (content.includes("--provenance=false")) {
+    pass("Makefile passes --provenance=false to docker build");
+  } else {
+    fail("Makefile missing --provenance=false — Docker may embed non-deterministic metadata");
+  }
+} else {
+  warn("No Makefile found");
+}
+console.log();
+
+// --- 11. Deterministic cpio (timestamps zeroed, --reproducible) ---
+console.log("11. Deterministic initramfs");
+if (existsSync(CONTAINERFILE)) {
+  const content = await Bun.file(CONTAINERFILE).text();
+  const checks = {
+    timestamps: content.includes('touch -hcd "@0"'),
+    sorted: content.includes("sort -z"),
+    reproducible: content.includes("--reproducible"),
+  };
+
+  if (checks.timestamps && checks.sorted && checks.reproducible) {
+    pass("cpio build zeroes timestamps, sorts entries, and uses --reproducible");
+  } else {
+    if (!checks.timestamps) fail("Missing timestamp zeroing (touch -hcd @0) in cpio build");
+    if (!checks.sorted) fail("Missing sorted file list (sort -z) in cpio build");
+    if (!checks.reproducible) fail("Missing --reproducible flag in cpio build");
+  }
+} else {
+  warn("No Containerfile found");
 }
 console.log();
 

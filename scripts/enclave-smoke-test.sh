@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Enclave smoke test — boots a Nitro Enclave and verifies core behavior.
 #
-# Prerequisites: nitro-cli, host-forwarder (or socat), jq, curl
-# Usage: ./scripts/enclave-smoke-test.sh out/nitro.eif [path-to-host-forwarder]
+# Prerequisites: nitro-cli, traffic-proxy, jq, curl
+# Usage: ./scripts/enclave-smoke-test.sh out/nitro.eif <path-to-traffic-proxy>
 set -euo pipefail
 
-EIF_PATH="${1:?Usage: $0 <path-to-eif> [forwarder-path]}"
-FORWARDER="${2:-}"
+EIF_PATH="${1:?Usage: $0 <path-to-eif> <traffic-proxy-path>}"
+TRAFFIC_PROXY="${2:?Usage: $0 <path-to-eif> <traffic-proxy-path>}"
 HTTP_PORT=8080
 VSOCK_HTTP_PORT=3000
 VSOCK_CONFIG_PORT=7777
@@ -40,21 +40,15 @@ sleep 2
 
 # --- Send boot config via VSOCK:7777 ---
 echo "[smoke] sending boot config via VSOCK:$VSOCK_CONFIG_PORT"
-echo '{"endpoints":[]}' | socat - VSOCK-CONNECT:"$ENCLAVE_CID":"$VSOCK_CONFIG_PORT"
+echo '{"endpoints":[]}' | "$TRAFFIC_PROXY" config send "$ENCLAVE_CID" "$VSOCK_CONFIG_PORT"
 echo "[smoke] boot config sent"
 
 sleep 2
 
 # --- Set up inbound HTTP bridge ---
-if [[ -n "$FORWARDER" ]]; then
-  echo "[smoke] bridging TCP:$HTTP_PORT → VSOCK:$ENCLAVE_CID:$VSOCK_HTTP_PORT (forwarder)"
-  "$FORWARDER" host "$HTTP_PORT" "$ENCLAVE_CID" "$VSOCK_HTTP_PORT" &
-  BRIDGE_PID=$!
-else
-  echo "[smoke] bridging TCP:$HTTP_PORT → VSOCK:$ENCLAVE_CID:$VSOCK_HTTP_PORT (socat fallback)"
-  socat TCP-LISTEN:"$HTTP_PORT",fork,reuseaddr VSOCK-CONNECT:"$ENCLAVE_CID":"$VSOCK_HTTP_PORT" &
-  BRIDGE_PID=$!
-fi
+echo "[smoke] bridging TCP:$HTTP_PORT → VSOCK:$ENCLAVE_CID:$VSOCK_HTTP_PORT"
+"$TRAFFIC_PROXY" host "$HTTP_PORT" "$ENCLAVE_CID" "$VSOCK_HTTP_PORT" &
+BRIDGE_PID=$!
 sleep 1
 
 BASE="http://127.0.0.1:$HTTP_PORT"
